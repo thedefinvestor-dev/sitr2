@@ -1,0 +1,600 @@
+/**
+ * POST /api/aave-proxy — Aave GraphQL proxy (browser-like headers)
+ * GET  /api/perps     — Hyperliquid + Nado funding arb (rewritten here to stay within Vercel function limit)
+ */
+
+const {
+  fetchPerpsDashboard,
+  fetchPerpsEquitySnapshotWithVariational,
+  fetchPerpsLiveRates,
+  appendEquitySnapshotStore,
+  buildEquitySnapshotFromDashboard,
+  repairEquitySnapshotDeposits,
+  reconstructGrvtSymbolSession,
+  isSolanaAddress,
+  isUsablePhoenixWallet,
+} = require('../lib/perps');
+const {
+  mergeVariationalRateSamples,
+  recordVariationalListingSamples,
+  pruneVariationalRateSamples,
+  variationalRateSampleKeepSymbols,
+} = require('../lib/variational-hedge');
+const { kvGet, kvSet, kvDel } = require('../lib/kv');
+const { CACHE_KEYS, parseJson: parseCronJson } = require('../lib/cron-runner');
+const { fetchLoopRates, mergeRecentLoopPositions } = require('../lib/loop-rates');
+const {
+  appendLoopSnapshotStore,
+  buildLoopSnapshotFromRates,
+  resolveLoopYieldWallets,
+  persistLoopYieldWallets,
+  persistLoopSnapshotStore,
+  loadLoopSnapshotStore,
+  ensureUsdeUsdmSnapshotsPurged,
+  ensureLoopSnapshotWalletPollutionPurged,
+  ensureLoopSnapshotsCompressed,
+} = require('../lib/loop-snapshots');
+const { ensureLoopLogoCache, sanitizeLogoCacheForStorage } = require('../lib/logo-resolver');
+
+const responseCache = new Map();
+const PERPS_DASHBOARD_CACHE_MS = 5 * 60 * 1000;
+const LOOP_RATES_CACHE_MS = 15 * 60 * 1000;
+const LOOP_RATES_KV_CACHE_MS = 15 * 60 * 1000;
+const LOOP_RATES_CACHE_VERSION = 'v11';
+
+function isWallet(v) {
+  return typeof v === 'string' && /^0x[a-fA-F0-9]{40}$/.test(v.trim());
+}
+
+function parseJson(raw, fallback) {
+  if (!raw) return fallback;
+  try { return JSON.parse(raw); } catch (e) { return fallback; }
+}
+
+// Perpl integration disabled. resolvePerplConfig always returns null so no
+// perpl fetches run and no perpl data is included in dashboard payloads.
+function resolvePerplConfig(query, savedConfig = {}) {
+  void query; void savedConfig;
+  return null;
+}
+
+function expectedSyncSecret() {
+  return process.env.SYNC_SECRET || process.env.CRON_SECRET || '';
+}
+
+async function persistVariationalRateSamplesFromDashboard(data, hedges = null) {
+  const listings = {
+    ...(data?.variationalListings || {}),
+    ...(data?._variationalListingBySymbol || {}),
+  };
+  const fromSpread = {};
+  for (const row of data?.rateSpread || []) {
+    if (!row?.symbol || row.variationalIntervalRate == null && row.variationalMarkPx == null) continue;
+    fromSpread[row.symbol] = {
+      symbol: row.symbol,
+      markPx: row.variationalMarkPx,
+      fundingRateInterval: row.variationalIntervalRate,
+      fundingRate8h: row.variational8h,
+      fundingIntervalHours: row.variationalIntervalHours,
+      fundingIntervalS: (row.variationalIntervalHours || 8) * 3600,
+      fundingNextAtMs: row.variationalNextFundingAtMs,
+      fundingClockSource: row.variationalFundingClockSource,
+    };
+  }
+  const combined = { ...fromSpread, ...listings };
+  if (!Object.keys(combined).length) return false;
+  const atMs = Number(data?.fetchedAt) || Date.now();
+  const existing = parseJson(await kvGet('vault:perps_variational_rate_samples'), {});
+  // Rate samples exist only to freeze Variational settlements — never keep live-cross-only symbols.
+  let hedgeRows = Array.isArray(hedges) ? hedges : null;
+  if (!hedgeRows) {
+    hedgeRows = data?.variationalHedges || data?.perpsVariationalHedges || null;
+  }
+  if (!Array.isArray(hedgeRows)) {
+    hedgeRows = parseJson(await kvGet('vault:perps_variational_hedges'), []);
+  }
+  const keep = variationalRateSampleKeepSymbols(hedgeRows, atMs);
+  const sampled = recordVariationalListingSamples(existing, combined, atMs, {
+    source: 'server',
+    symbols: keep,
+  });
+  const merged = mergeVariationalRateSamples(existing, sampled);
+  // Never kvSet {} over a populated store when hedges have not hydrated yet.
+  if (!keep.size && Object.keys(existing || {}).length) {
+    await kvSet('vault:perps_variational_rate_samples', JSON.stringify(merged));
+    return true;
+  }
+  const pruned = pruneVariationalRateSamples(merged, keep);
+  await kvSet('vault:perps_variational_rate_samples', JSON.stringify(pruned));
+  return true;
+}
+
+function providedCronSecret(req) {
+  return String(
+    req.headers['x-sync-secret']
+    || req.query?.secret
+    || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+    || '',
+  );
+}
+
+function sortedCsv(raw) {
+  return String(raw || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b))
+    .join(',');
+}
+
+function msUntilNextHourly02() {
+  const now = new Date();
+  const next = new Date(now);
+  next.setMinutes(2, 0, 0);
+  if (next <= now) next.setHours(next.getHours() + 1);
+  return Math.max(60 * 1000, next.getTime() - now.getTime());
+}
+
+function cacheGet(key) {
+  const entry = responseCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) return null;
+  return entry.body;
+}
+
+function cacheSet(key, body, ttlMs) {
+  responseCache.set(key, {
+    body,
+    expiresAt: Date.now() + Math.max(1000, ttlMs),
+    savedAt: Date.now(),
+  });
+  return body;
+}
+
+async function fetchWithRetry(fn, label, retries = 1) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  const message = lastError?.message || String(lastError || 'failed');
+  throw new Error(`${label} retry failed: ${message}`);
+}
+
+async function cachedJson(key, ttlMs, label, fn) {
+  const cached = cacheGet(key);
+  if (cached) return { ...cached, cached: true };
+  try {
+    const body = await fetchWithRetry(fn, label, 1);
+    return cacheSet(key, body, ttlMs);
+  } catch (e) {
+    const stale = responseCache.get(key)?.body;
+    if (stale) {
+      const warning = `${label} retry failed; showing cached data: ${e.message || e}`;
+      return {
+        ...stale,
+        cached: true,
+        stale: true,
+        warning,
+        warnings: [...new Set([...(stale.warnings || []), warning])],
+      };
+    }
+    throw e;
+  }
+}
+
+function cacheKeyParts(key) {
+  const [scope, rest = ''] = String(key || '').split(/:(.*)/s);
+  return {
+    scope,
+    symbols: rest.split(',').map(s => s.trim()).filter(Boolean),
+  };
+}
+
+async function kvCacheGet(key, matchKey, maxAgeMs, opts = {}) {
+  const cached = parseCronJson(await kvGet(key), null);
+  if (!cached?.data || !cached.fetchedAt) return null;
+  if (matchKey && cached.key && cached.key !== matchKey) {
+    if (!opts.allowSymbolSuperset) return null;
+    const requested = cacheKeyParts(matchKey);
+    const available = cacheKeyParts(cached.key);
+    if (requested.scope !== available.scope) return null;
+    const availableSet = new Set(available.symbols);
+    if (requested.symbols.some(symbol => !availableSet.has(symbol))) return null;
+  }
+  if (Date.now() - Number(cached.fetchedAt) > maxAgeMs) return null;
+  return { ...cached.data, cached: true, cacheSource: 'kv', cacheFetchedAt: cached.fetchedAt };
+}
+
+async function kvCacheSet(key, matchKey, data) {
+  await kvSet(key, JSON.stringify({ key: matchKey, fetchedAt: Date.now(), data }));
+}
+
+async function handlePerpsCronSnapshot(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const secret = String(req.headers['x-sync-secret'] || req.query.secret || '');
+  const expected = expectedSyncSecret();
+  if (!expected || secret !== expected) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const savedConfig = parseJson(await kvGet('vault:perps_config'), {});
+  const portfolio = parseJson(await kvGet('vault:portfolio'), {});
+  const portfolioConfig = portfolio?.perpsArb && typeof portfolio.perpsArb === 'object'
+    ? portfolio.perpsArb
+    : {};
+  const config = isWallet(savedConfig.hyperliquid) ? savedConfig : portfolioConfig;
+  const wallet = String(config.hyperliquid || '').trim();
+  const nadoWallet = String(config.nado || wallet).trim();
+  const grvtSubAccount = String(
+    config.grvtSubAccount || process.env.GRVT_SUB_ACCOUNT_ID || '4860249204328359',
+  ).trim();
+  const phoenixWallet = String(config.phoenix || config.phoenixWallet || '').trim();
+  const perpl = resolvePerplConfig({}, config);
+  const days = Math.min(365, Math.max(1, parseInt(config.days || '30', 10) || 30));
+
+  if (!isWallet(wallet)) {
+    return res.status(400).json({ error: 'No valid perps wallet in vault:perps_config' });
+  }
+  if (!isWallet(savedConfig.hyperliquid)) {
+    await kvSet('vault:perps_config', JSON.stringify({
+      ...config,
+      hyperliquid: wallet,
+      nado: nadoWallet,
+      grvtSubAccount,
+      ...(isUsablePhoenixWallet(phoenixWallet) ? { phoenix: phoenixWallet } : {}),
+      ...(perpl ? { perpl } : {}),
+      configured: true,
+    }));
+  }
+
+  try {
+    const savedSnapshots = parseJson(await kvGet('vault:perps_snapshots'), {});
+    const previousSnapshot = Object.values(savedSnapshots)
+      .sort((a, b) => (Number(a?.fetchedAt) || 0) - (Number(b?.fetchedAt) || 0))
+      .at(-1);
+    const hedges = parseJson(await kvGet('vault:perps_variational_hedges'), []);
+    const data = await fetchPerpsEquitySnapshotWithVariational({
+      hyperliquid: wallet,
+      nado: nadoWallet,
+      grvtSubAccount,
+      phoenix: isUsablePhoenixWallet(phoenixWallet) ? phoenixWallet : '',
+      perpl,
+      // Fallback only if capital-flow refresh fails; live flows override inside the fetcher.
+      cumulativeNetDeposits: Number(previousSnapshot?.cumulativeNetDeposits) || 0,
+    }, { refreshCapitalFlows: true, hedges });
+    let store = appendEquitySnapshotStore(savedSnapshots, data);
+    let depositRepairChanged = 0;
+    if (data.capitalFlows) {
+      const repaired = repairEquitySnapshotDeposits(store, data.capitalFlows);
+      store = repaired.store;
+      depositRepairChanged = repaired.changed;
+    }
+    await kvSet('vault:perps_snapshots', JSON.stringify(store));
+    try {
+      await persistVariationalRateSamplesFromDashboard(data, hedges);
+    } catch (sampleErr) {
+      console.warn('[perps-rate-samples]', sampleErr?.message || sampleErr);
+    }
+    const { key, record } = buildEquitySnapshotFromDashboard(data);
+    return res.status(200).json({
+      ok: true,
+      bucket: key,
+      totalEquity: record.totalEquity,
+      cumulativeNetDeposits: record.cumulativeNetDeposits,
+      adjustedEquity: record.adjustedEquity,
+      fetchedAt: record.fetchedAt,
+      equityCollectionSpanMs: record.equityCollectionSpanMs,
+      equityFetchedAts: record.equityFetchedAts,
+      equitySampleMode: record.equitySampleMode,
+      depositRepairChanged,
+      snapshotCount: Object.keys(store).length,
+    });
+  } catch (e) {
+    console.error('[perps-cron]', e);
+    return res.status(500).json({ error: e.message || 'Cron snapshot failed' });
+  }
+}
+
+async function handlePerps(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-sync-secret');
+
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+
+  if (req.query.cronSnapshot === '1') {
+    return handlePerpsCronSnapshot(req, res);
+  }
+
+  const wallet = String(req.query.wallet || req.query.hyperliquid || '').trim();
+  const nadoWallet = String(req.query.nadoWallet || req.query.nado || wallet).trim();
+  const days = Math.min(365, Math.max(1, parseInt(req.query.days || '30', 10) || 30));
+
+  const grvtSubAccount = String(
+    req.query.grvtSubAccount || req.query.grvt || process.env.GRVT_SUB_ACCOUNT_ID || '4860249204328359',
+  ).trim();
+  const phoenixWalletRaw = String(req.query.phoenixWallet || req.query.phoenix || '').trim();
+  const phoenixWallet = isUsablePhoenixWallet(phoenixWalletRaw) ? phoenixWalletRaw : '';
+  const savedPerpsConfig = parseJson(await kvGet('vault:perps_config'), {});
+  const perpl = resolvePerplConfig(req.query, savedPerpsConfig);
+
+  if (req.query.live === '1') {
+    try {
+      const symbols = String(req.query.symbols || '')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+      const cacheKey = `${grvtSubAccount}:${sortedCsv(req.query.symbols)}`;
+      const kvCached = req.query.force === '1'
+        ? null
+        : await kvCacheGet(CACHE_KEYS.perpsLive, cacheKey, 90 * 1000, { allowSymbolSuperset: true });
+      if (kvCached) return res.status(200).json(kvCached);
+      const data = await cachedJson(
+        `perps:live:${cacheKey}`,
+        msUntilNextHourly02(),
+        'Perps live funding',
+        () => fetchPerpsLiveRates({ grvtSubAccount, symbols }),
+      );
+      await kvCacheSet(CACHE_KEYS.perpsLive, cacheKey, data);
+      try {
+        await persistVariationalRateSamplesFromDashboard(data);
+      } catch (sampleErr) {
+        console.warn('[perps-rate-samples]', sampleErr?.message || sampleErr);
+      }
+      return res.status(200).json(data);
+    } catch (e) {
+      console.error('[perps-live]', e);
+      return res.status(500).json({ error: e.message || 'Live rates fetch failed' });
+    }
+  }
+
+  if (req.query.grvtLeg === '1') {
+    try {
+      const symbol = String(req.query.symbol || 'HBAR').trim().toUpperCase();
+      const legDays = Math.min(365, Math.max(1, parseInt(req.query.days || '90', 10) || 90));
+      const result = await reconstructGrvtSymbolSession({
+        subAccountId: grvtSubAccount,
+        symbol,
+        days: legDays,
+      });
+      return res.status(200).json({ ok: true, ...result });
+    } catch (e) {
+      console.error('[perps-grvt-leg]', e);
+      return res.status(500).json({ error: e.message || 'GRVT leg reconstruct failed' });
+    }
+  }
+
+  if (!isWallet(wallet)) {
+    return res.status(400).json({ error: 'Valid hyperliquid wallet required (0x + 40 hex chars)' });
+  }
+  if (!isWallet(nadoWallet)) {
+    return res.status(400).json({ error: 'Valid nado wallet required' });
+  }
+
+  const dashboardOpts = {
+    hyperliquid: wallet,
+    nado: nadoWallet,
+    grvtSubAccount,
+    phoenix: phoenixWallet,
+    perpl,
+    days,
+    grvtPositionsOverride: req.query.grvtPositions || null,
+  };
+
+  try {
+    const hedges = parseJson(await kvGet('vault:perps_variational_hedges'), []);
+    const data = await cachedJson(
+      `perps:dashboard:${wallet.toLowerCase()}:${nadoWallet.toLowerCase()}:${grvtSubAccount}:${phoenixWallet}:${perpl ? perpl.apiKey.slice(0, 8) : 'nop'}:${days}`,
+      PERPS_DASHBOARD_CACHE_MS,
+      'Perps dashboard',
+      () => fetchPerpsDashboard(dashboardOpts, { hedges }),
+    );
+    // Active symbols are derived from the dashboard payload; no separate KV list needed.
+    try {
+      await persistVariationalRateSamplesFromDashboard(data);
+    } catch (e) {
+      console.warn('[perps-rate-samples]', e?.message || e);
+    }
+    return res.status(200).json(data);
+  } catch (e) {
+    console.error('[perps]', e);
+    return res.status(500).json({ error: e.message || 'Perps fetch failed' });
+  }
+}
+
+async function persistLoopLogoCache(positions) {
+  try {
+    const raw = parseJson(await kvGet('vault:logo_cache'), {});
+    const saved = sanitizeLogoCacheForStorage(raw);
+    const strippedBase64 = Object.keys(saved).length !== Object.keys(raw || {}).length;
+    const { cache, changed } = await ensureLoopLogoCache(saved, positions, { maxResolve: 16 });
+    if (changed || strippedBase64) await kvSet('vault:logo_cache', JSON.stringify(cache));
+    return changed || strippedBase64;
+  } catch (e) {
+    console.warn('[loop-logos]', e.message || e);
+    return false;
+  }
+}
+
+async function handleLoopCronSnapshot(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const expected = expectedSyncSecret();
+  if (!expected || providedCronSecret(req) !== expected) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const wallets = await resolveLoopYieldWallets({ kvGet, parseJson });
+  if (!wallets.length) {
+    return res.status(400).json({ error: 'No yield wallets configured for loop snapshots' });
+  }
+
+  try {
+    const previousCache = parseCronJson(await kvGet(CACHE_KEYS.loopRates), null);
+    const freshData = await fetchLoopRates({ wallets });
+    const data = mergeRecentLoopPositions(freshData, previousCache?.data, {
+      previousFetchedAt: previousCache?.fetchedAt,
+    });
+    const savedSnapshots = await loadLoopSnapshotStore(kvGet);
+    const store = appendLoopSnapshotStore(savedSnapshots, data);
+    const persisted = await persistLoopSnapshotStore({ kvGet, kvSet, store });
+    await persistLoopYieldWallets(kvSet, wallets);
+    const logosUpdated = await persistLoopLogoCache(data.positions);
+    await kvSet(CACHE_KEYS.loopRates, JSON.stringify({
+      key: `${LOOP_RATES_CACHE_VERSION}:${wallets.map((w) => w.toLowerCase()).sort().join(',')}`,
+      fetchedAt: Date.now(),
+      data,
+    }));
+    const { key, record } = buildLoopSnapshotFromRates(data);
+    return res.status(200).json({
+      ok: true,
+      bucket: key,
+      fetchedAt: record.fetchedAt,
+      positionCount: record.positions.length,
+      snapshotCount: persisted.bucketCount,
+      latestFetchedAt: persisted.latestFetchedAt,
+      logosUpdated,
+    });
+  } catch (e) {
+    console.error('[loop-cron]', e);
+    return res.status(500).json({ error: e.message || 'Loop cron snapshot failed' });
+  }
+}
+
+async function handleLoopSnapshots(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+
+  try {
+    await ensureUsdeUsdmSnapshotsPurged({ kvGet, kvSet, parseJson });
+    await ensureLoopSnapshotWalletPollutionPurged({ kvGet, kvSet, kvDel }).catch((e) => {
+      console.warn('[loop-snapshots] pollution purge failed:', e.message || e);
+    });
+    await ensureLoopSnapshotsCompressed({ kvGet, kvSet }).catch((e) => {
+      console.warn('[loop-snapshots] compress failed:', e.message || e);
+    });
+    const loopSnapshots = await loadLoopSnapshotStore(kvGet);
+    return res.status(200).json({ ok: true, loopSnapshots });
+  } catch (e) {
+    console.error('[loop-snapshots]', e);
+    return res.status(500).json({ error: e.message || 'Loop snapshots fetch failed' });
+  }
+}
+
+async function persistLoopSnapshotsFromRates(data, wallets = []) {
+  try {
+    const savedSnapshots = await loadLoopSnapshotStore(kvGet);
+    const store = appendLoopSnapshotStore(savedSnapshots, data);
+    const persisted = await persistLoopSnapshotStore({ kvGet, kvSet, store });
+    if (wallets.length) await persistLoopYieldWallets(kvSet, wallets);
+    return persisted;
+  } catch (e) {
+    console.warn('[loop-snapshots-persist]', e.message || e);
+    throw e;
+  }
+}
+
+async function handleLoopRates(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+
+  const wallets = String(req.query.wallets || req.query.wallet || '')
+    .split(',')
+    .map(w => w.trim())
+    .filter(Boolean);
+
+  try {
+    const walletKey = `${LOOP_RATES_CACHE_VERSION}:${wallets.map(w => w.toLowerCase()).sort().join(',')}`;
+    const writeSnapshots = req.query.snapshots !== '0';
+    const kvCached = req.query.force === '1'
+      ? null
+      : await kvCacheGet(CACHE_KEYS.loopRates, walletKey, LOOP_RATES_KV_CACHE_MS);
+    if (kvCached) {
+      if (writeSnapshots) await persistLoopSnapshotsFromRates(kvCached, wallets);
+      return res.status(200).json(kvCached);
+    }
+    const previousCache = parseCronJson(await kvGet(CACHE_KEYS.loopRates), null);
+    const freshData = await cachedJson(
+      `loop-rates:${walletKey}`,
+      LOOP_RATES_CACHE_MS,
+      'Loop rates',
+      () => fetchLoopRates({ wallets }),
+    );
+    const data = mergeRecentLoopPositions(freshData, previousCache?.data, {
+      previousFetchedAt: previousCache?.fetchedAt,
+    });
+    if (writeSnapshots) await persistLoopSnapshotsFromRates(data, wallets);
+    await persistLoopLogoCache(data.positions);
+    await kvCacheSet(CACHE_KEYS.loopRates, walletKey, data);
+    return res.status(200).json(data);
+  } catch (e) {
+    console.error('[loop-rates]', e);
+    return res.status(500).json({ error: e.message || 'Loop rates fetch failed' });
+  }
+}
+
+module.exports = async function handler(req, res) {
+  if (req.query.loopCronSnapshot === '1') {
+    return handleLoopCronSnapshot(req, res);
+  }
+  if (req.query.loopSnapshots === '1') {
+    return handleLoopSnapshots(req, res);
+  }
+  if (req.query.loopRates === '1') {
+    return handleLoopRates(req, res);
+  }
+
+  if (req.method === 'GET' && (
+    req.query.wallet
+    || req.query.hyperliquid
+    || req.query.cronSnapshot === '1'
+    || req.query.live === '1'
+    || req.query.grvtLeg === '1'
+  )) {
+    return handlePerps(req, res);
+  }
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).end();
+
+  let body = req.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch (e) {
+      return res.status(400).json({ error: 'Invalid JSON' });
+    }
+  }
+
+  try {
+    const r = await fetch('https://api.v3.aave.com/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Origin': 'https://app.aave.com',
+        'Referer': 'https://app.aave.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      },
+      body: JSON.stringify(body),
+    });
+
+    const data = await r.json();
+    return res.status(200).json(data);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+};
