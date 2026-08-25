@@ -1,5 +1,4 @@
 {
-  "_deployTest": "2026-08-25T20:08Z",
   "version": 2,
   "ignoreCommand": "[ \"$VERCEL_ENV\" = \"preview\" ]",
   "regions": ["iad1"],
