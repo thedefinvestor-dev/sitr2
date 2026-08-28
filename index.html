@@ -34540,7 +34540,10 @@ function perpsApplyPartialSlicePnlAttribution(data, hedges) {
             continue;
         }
         const residualRatio = residualSize / fullNadoSize;
-        pair.nadoSize = residualSize;
+        // Preserve the Nado leg's direction — a short must stay negative so the
+        // card renders SHORT (same rule as steps 2b/2c for the other legs).
+        const sign = Number(na.size) < 0 ? -1 : 1;
+        pair.nadoSize = sign * residualSize;
         // Derive the residual's own entry from the full-position blended entry
         // minus the Var slice: (blendedEntry×full − sliceEntry×slice) / residual.
         // This keeps Card A + Card B exactly equal to the full position's uPnL
@@ -34551,7 +34554,6 @@ function perpsApplyPartialSlicePnlAttribution(data, hedges) {
             ? (fullEntry * fullNadoSize - sliceEntry * info.slice) / residualSize
             : 0;
         const mark = Number(na.markPx || pair.nado?.markPx || 0);
-        const sign = Number(na.size) < 0 ? -1 : 1;
         let residualUpnl = null;
         if (residualEntry > 0 && mark > 0) {
             residualUpnl = VH.variationalLegPnl
@@ -34566,7 +34568,7 @@ function perpsApplyPartialSlicePnlAttribution(data, hedges) {
         pair.nadoEntry = residualEntry > 0 ? residualEntry : na.entryPx;
         pair.nadoFundingSinceOpen = (Number(na.fundingSinceOpen || 0) || 0) * residualRatio;
         if (pair.crossLegA?.venue === 'nado') {
-            pair.crossLegA.size = residualSize;
+            pair.crossLegA.size = sign * residualSize;
             pair.crossLegA.unrealizedPnl = residualUpnl;
             pair.crossLegA.entryPx = residualEntry > 0 ? residualEntry : pair.crossLegA.entryPx;
             pair.crossLegA.fundingSinceOpen = pair.nadoFundingSinceOpen;
@@ -34620,7 +34622,10 @@ function perpsApplyPartialSlicePnlAttribution(data, hedges) {
             if (residualUpnl == null || !Number.isFinite(residualUpnl)) {
                 residualUpnl = (Number(leg.unrealizedPnl || 0) || 0) * residualRatio;
             }
-            leg.size = residualSize;
+            // Preserve the leg's direction — a short must stay negative (same
+            // rule as the hl_nado step 2c fix) so a short tracked leg prorated
+            // by a Variational slice still renders SHORT, not LONG.
+            leg.size = sign * residualSize;
             leg.unrealizedPnl = residualUpnl;
             if (residualEntry > 0) leg.entryPx = residualEntry;
         }
