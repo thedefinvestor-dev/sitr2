@@ -768,6 +768,20 @@ body[data-active-tab="perps"] .topbar,
   line-height: 1.25;
 }
 .perps-mv3-card .perps-hedge-partial-btn { margin-top: 8px; width: 100%; }
+.perps-hedge-actions {
+  display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center;
+  margin-top: 0.55rem;
+}
+.perps-hedge-actions .perps-hedge-partial-btn { margin-top: 0; }
+.perps-mv3-card .perps-hedge-actions { margin-top: 8px; }
+.perps-mv3-card .perps-hedge-actions .perps-hedge-partial-btn { width: 100%; }
+.perps-btn.ghost {
+  height: 28px; padding: 0 0.7rem; border-radius: 7px;
+  font-size: 0.72rem; font-weight: 700; cursor: pointer;
+  border: 1px solid rgba(134,159,179,0.22); background: transparent; color: #8b98a6;
+}
+.perps-btn.ghost:hover { color: #c8d2dc; border-color: rgba(134,159,179,0.4); }
+.perps-mv3-card .perps-hedge-dismiss-btn { width: 100%; margin-top: 8px; }
 .perps-kpi-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; }
 .perps-kpi {
   border:1px solid rgba(134,159,179,0.15); border-radius:10px;
@@ -11077,6 +11091,7 @@ const PERPS_SESSION_KEY = 'vault-perps-wallets-session';
 const PERPS_SNAPSHOTS_KEY = 'vault-perps-snapshots';
 const PERPS_VARIATIONAL_HEDGES_KEY = 'vault-perps-variational-hedges';
 const PERPS_VARIATIONAL_SETTLEMENTS_KEY = 'vault-perps-variational-settlements';
+const PERPS_HEDGE_DISMISS_KEY = 'vault-perps-hedge-dismissals';
 const PERPS_CLOSED_PAIRS_KEY = 'vault-perps-closed-pairs';
 const PERPS_VARIATIONAL_RATE_SAMPLES_KEY = 'vault-perps-variational-rate-samples';
 const PERPS_DAILY_FUND_CACHE_KEY = 'vault-perps-daily-fund-cache-v2'; // v2 = Bucharest-day bucketing
@@ -34113,6 +34128,28 @@ function perpsBindVariationalHedgeDelegate() {
         const residualSize = btn.getAttribute('data-residual-size') || '';
         perpsHedgePartialWithVariational(symbol, venue, residualSize);
     });
+    document.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('[data-perps-hedge-dismiss-variational]');
+        if (!btn) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        const symbol = btn.getAttribute('data-symbol') || '';
+        const venue = btn.getAttribute('data-venue') || '';
+        perpsSetHedgeDismissed(symbol, venue, true);
+        const data = perpsDataForVariationalAction();
+        if (data) perpsRenderDashboard(data);
+    });
+    document.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('[data-perps-hedge-undo-variational]');
+        if (!btn) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        const symbol = btn.getAttribute('data-symbol') || '';
+        const venue = btn.getAttribute('data-venue') || '';
+        perpsSetHedgeDismissed(symbol, venue, false);
+        const data = perpsDataForVariationalAction();
+        if (data) perpsRenderDashboard(data);
+    });
 }
 if (typeof document !== 'undefined') {
     if (document.readyState === 'loading') {
@@ -34536,6 +34573,67 @@ function perpsApplyPartialSlicePnlAttribution(data, hedges) {
         }
         pair.combinedUpnl = (Number(pair.hlUpnl || 0) || 0) + (Number(pair.nadoUpnl || 0) || 0);
         pair.netArbPnl = (pair.combinedUpnl ?? 0) + (pair.fundingSinceOpen ?? 0) - (pair.fees ?? 0);
+    }
+
+    // 2b. Other cross pairs (nado_phoenix, hl_phoenix, …): a partial Variational
+    //     hedge that tracks one of the pair's venues covers a slice of that leg.
+    //     Prorate that leg to its residual (full − slice) so the card only shows
+    //     the exchange-to-exchange portion (e.g. MON Phoenix 1,652,170 minus the
+    //     1,468,270 Var slice = 183,900 against the Nado 183,900 short).
+    for (const pair of data.paired || []) {
+        if (pair.pairType === 'hl_nado' || VH.isVariationalPair?.(pair)) continue;
+        if (!pair.crossLegA || !pair.crossLegB) continue;
+        const sym = VH.toBaseSymbol(pair.symbol);
+        const crossLegs = [
+            { leg: pair.crossLegA, venue: VH.normalizeTrackedVenue?.(pair.crossLegA.venue) || pair.crossLegA.venue },
+            { leg: pair.crossLegB, venue: VH.normalizeTrackedVenue?.(pair.crossLegB.venue) || pair.crossLegB.venue },
+        ];
+        for (const { leg, venue } of crossLegs) {
+            const info = partialBySymVenue.get(`${sym}|${venue}`);
+            if (!info || !(info.slice > 0)) continue;
+            const fullSize = Math.abs(Number(leg.size || 0));
+            if (!fullSize) continue;
+            const residualSize = Math.max(0, fullSize - info.slice);
+            if (residualSize <= 0) {
+                leg.size = 0;
+                leg.unrealizedPnl = 0;
+                continue;
+            }
+            const residualRatio = residualSize / fullSize;
+            const fullEntry = Number(leg.entryPx || 0);
+            const sliceEntry = Number(info.entry || 0);
+            const residualEntry = (fullEntry > 0 && sliceEntry > 0)
+                ? (fullEntry * fullSize - sliceEntry * info.slice) / residualSize
+                : 0;
+            const mark = Number(leg.markPx || 0);
+            const sign = Number(leg.size) < 0 ? -1 : 1;
+            let residualUpnl = null;
+            if (residualEntry > 0 && mark > 0) {
+                residualUpnl = VH.variationalLegPnl
+                    ? VH.variationalLegPnl(sign * residualSize, residualEntry, mark)
+                    : (mark - residualEntry) * sign * residualSize;
+            }
+            if (residualUpnl == null || !Number.isFinite(residualUpnl)) {
+                residualUpnl = (Number(leg.unrealizedPnl || 0) || 0) * residualRatio;
+            }
+            leg.size = residualSize;
+            leg.unrealizedPnl = residualUpnl;
+            if (residualEntry > 0) leg.entryPx = residualEntry;
+        }
+        pair.combinedUpnl = (Number(pair.crossLegA?.unrealizedPnl ?? 0) || 0) + (Number(pair.crossLegB?.unrealizedPnl ?? 0) || 0);
+        pair.netArbPnl = (pair.combinedUpnl ?? 0) + (pair.fundingSinceOpen ?? 0) - (pair.fees ?? 0);
+        // Sync the mismatch flag to the prorated legs so a stale server alert
+        // (computed from the full-size legs) never flags a now-matched pair.
+        const pa = Math.abs(Number(pair.crossLegA?.size || 0));
+        const pb = Math.abs(Number(pair.crossLegB?.size || 0));
+        const maxLeg = Math.max(pa, pb, 1e-12);
+        const newMismatchPct = (Math.abs(pa - pb) / maxLeg) * 100;
+        pair.sizeMismatchPct = newMismatchPct;
+        if (newMismatchPct >= 0.001) {
+            if (!(pair.alerts || []).includes('size_mismatch')) pair.alerts = [...(pair.alerts || []), 'size_mismatch'];
+        } else {
+            pair.alerts = (pair.alerts || []).filter((a) => a !== 'size_mismatch');
+        }
     }
 
     // 3. Funding/fees on the tracked venue: the Var-covered slice only pays
@@ -35704,11 +35802,37 @@ function perpsEffectiveMismatchResidual(p) {
     };
 }
 
+function perpsHedgeDismissalKey(symbol, venue) {
+    const VH = window.VariationalHedge;
+    if (VH?.variationalHedgeMatchKey) return VH.variationalHedgeMatchKey(symbol, venue);
+    return `${String(symbol || '').trim().toUpperCase()}|${String(venue || '').trim().toLowerCase()}`;
+}
+
+function perpsLoadHedgeDismissals() {
+    try {
+        const raw = JSON.parse(localStorage.getItem(PERPS_HEDGE_DISMISS_KEY) || '{}');
+        return raw && typeof raw === 'object' ? raw : {};
+    } catch (e) { return {}; }
+}
+
+function perpsIsHedgeDismissed(symbol, venue) {
+    return Boolean(perpsLoadHedgeDismissals()[perpsHedgeDismissalKey(symbol, venue)]);
+}
+
+function perpsSetHedgeDismissed(symbol, venue, dismissed) {
+    const key = perpsHedgeDismissalKey(symbol, venue);
+    const map = perpsLoadHedgeDismissals();
+    if (dismissed) map[key] = true;
+    else delete map[key];
+    try { localStorage.setItem(PERPS_HEDGE_DISMISS_KEY, JSON.stringify(map)); } catch (e) {}
+}
+
 /** Button markup to hedge the residual (unhedged) slice of a mismatched pair
- * with Variational. Empty string when the pair is fully hedged or no residual
- * can be computed. An existing partial hedge that only covers part of the
- * residual does NOT suppress the button — it offers to hedge the still-uncovered
- * remainder (the action extends the existing hedge). */
+ * with Variational, plus a "Don't hedge" dismiss. Empty string when the pair is
+ * fully hedged or no residual can be computed. An existing partial hedge that
+ * only covers part of the residual does NOT suppress the button — it offers to
+ * hedge the still-uncovered remainder (the action extends the existing hedge).
+ * A dismissed symbol+venue shows an "Show hedge option" undo instead. */
 function perpsPartialHedgeButtonHtml(p) {
     if (!p || perpsPairHasSizeMismatch(p) !== true) return '';
     const VH = window.VariationalHedge;
@@ -35722,8 +35846,16 @@ function perpsPartialHedgeButtonHtml(p) {
         ? Number(effective.uncovered)
         : Number(partialInfo.residualSize);
     if (!Number.isFinite(residualSize) || residualSize <= 0) return '';
+    const sym = p.symbol;
+    const venue = partialInfo.venue;
+    if (perpsIsHedgeDismissed(sym, venue)) {
+        return `<button type="button" class="perps-btn ghost perps-hedge-dismiss-btn" data-perps-hedge-undo-variational data-symbol="${dashEsc(sym)}" data-venue="${dashEsc(venue)}">Show hedge option</button>`;
+    }
     const sizeLabel = `${perpsFmtSize(residualSize)} ${partialInfo.venueLabel}`;
-    return `<button type="button" class="perps-btn secondary perps-hedge-partial-btn" data-perps-hedge-partial-variational data-symbol="${dashEsc(p.symbol)}" data-venue="${dashEsc(partialInfo.venue)}" data-residual-size="${residualSize}">Hedge partial with Variational (${dashEsc(sizeLabel)})</button>`;
+    return `<div class="perps-hedge-actions">
+        <button type="button" class="perps-btn secondary perps-hedge-partial-btn" data-perps-hedge-partial-variational data-symbol="${dashEsc(sym)}" data-venue="${dashEsc(venue)}" data-residual-size="${residualSize}">Hedge partial with Variational (${dashEsc(sizeLabel)})</button>
+        <button type="button" class="perps-btn ghost perps-hedge-dismiss-btn" data-perps-hedge-dismiss-variational data-symbol="${dashEsc(sym)}" data-venue="${dashEsc(venue)}">Don't hedge</button>
+    </div>`;
 }
 
 function perpsEditVariationalEntry(hedgeId) {
@@ -38549,6 +38681,15 @@ function perpsPairHasSizeMismatch(p) {
         const varLeg = p.crossLegA?.venue === 'variational' ? p.crossLegA : p.crossLegB;
         const hedge = perpsResolveVariationalHedge(p);
         if (VH.variationalPairHasSizeMismatch(trackedLeg, hedge, varLeg)) return true;
+    }
+    // Cross pairs (nado_phoenix, hl_phoenix, …): if a partial Variational hedge
+    // already covers the bigger leg's full residual, the pair is fully hedged —
+    // never flag a mismatch computed from the raw full-size legs (e.g. MON Nado
+    // 183,900 short × Phoenix 1,652,170 long whose 1,468,270 Phoenix residual is
+    // already covered by a Variational hedge).
+    if (p?.crossLegA && p?.crossLegB && p.pairType !== 'hl_nado' && !(VH?.isVariationalPair?.(p))) {
+        const covered = perpsEffectiveMismatchResidual(p);
+        if (covered && Number(covered.uncovered) <= 0) return false;
     }
     if (p?.crossLegA && p?.crossLegB) {
         const a = Math.abs(Number(p.crossLegA.size || 0));

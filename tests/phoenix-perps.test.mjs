@@ -197,7 +197,10 @@ function pass(name) {
 }
 
 {
-  // Tiny opposite leg must stay unhedged (not steal a fake hedge).
+  // Pair-all: any two opposite legs pair regardless of mismatch (smaller leg is
+  // fully consumed as a partial hedge; residual stays on the bigger leg). The
+  // client then offers a Variational hedge for the residual — so a tiny leg is
+  // no longer left "unhedged".
   const arb = buildPairedAnalysis({
     hlState: {
       positions: [{
@@ -221,9 +224,80 @@ function pass(name) {
     spreadRows: [{ symbol: 'ETH', hl8h: 0.0001, extended8h: -0.00005, spreadHlExtended8h: 0.00015 }],
     days: 30,
   });
-  assert.equal(arb.paired.length, 0, '98% mismatch must not pair');
-  assert.equal(arb.unhedged.length, 2);
-  pass('buildPairedAnalysis rejects tiny opposite leg');
+  assert.equal(arb.paired.length, 1, 'opposite legs must pair even with 98% mismatch');
+  assert.equal(arb.paired[0].pairType, 'hl_extended');
+  assert.ok(arb.paired[0].alerts.includes('size_mismatch'), 'partial pair must flag size mismatch');
+  assert.equal(arb.unhedged.length, 0);
+  pass('buildPairedAnalysis pairs opposite legs regardless of mismatch');
+}
+
+{
+  // User MON scenario: Nado small short × Phoenix large long must pair as a
+  // nado_phoenix partial hedge (Nado fully consumed), leaving the Phoenix
+  // residual in the pair — NOT an unhedged Nado row.
+  const arb = buildPairedAnalysis({
+    hlState: { positions: [] },
+    nadoState: {
+      positions: [{
+        venue: 'nado', symbol: 'MON', size: -183900, side: 'short',
+        entryPx: 0.026, markPx: 0.026, notional: 4781.4, unrealizedPnl: 0, fundingSinceOpen: 0,
+      }],
+    },
+    phoenixState: {
+      positions: [{
+        venue: 'phoenix', symbol: 'MON', size: 1652170, side: 'long',
+        entryPx: 0.026, markPx: 0.026, notional: 42956.42, unrealizedPnl: 0, fundingSinceOpen: 0,
+      }],
+    },
+    hlFunding: { payments: [], totalFunding: 0 },
+    nadoFunding: { payments: [], totalFunding: 0 },
+    phoenixFunding: { payments: [], totalFunding: 0 },
+    hlFills: { fills: [], totalFees: 0, totalRealized: 0 },
+    nadoMatches: { matches: [], totalFees: 0, totalRealized: 0 },
+    phoenixFills: { fills: [], totalFees: 0, totalRealized: 0 },
+    spreadRows: [],
+    days: 30,
+  });
+  assert.equal(arb.paired.length, 1, 'MON Nado×Phoenix must pair');
+  assert.equal(arb.paired[0].pairType, 'nado_phoenix');
+  assert.ok(arb.paired[0].alerts.includes('size_mismatch'));
+  const nadoSize = Math.abs(arb.paired[0].crossLegA.venue === 'nado' ? arb.paired[0].crossLegA.size : arb.paired[0].crossLegB.size);
+  const phxSize = Math.abs(arb.paired[0].crossLegA.venue === 'phoenix' ? arb.paired[0].crossLegA.size : arb.paired[0].crossLegB.size);
+  assert.equal(nadoSize, 183900, 'smaller Nado leg fully consumed in the pair');
+  assert.equal(phxSize, 1652170, 'bigger Phoenix leg keeps the residual in the pair');
+  assert.equal(arb.unhedged.length, 0, 'Nado must not show as unhedged');
+  pass('buildPairedAnalysis MON Nado×Phoenix partial pair');
+}
+
+{
+  // User SKY scenario: Nado small long × HL large short pairs as hl_nado with
+  // the residual (bigger minus smaller) available for a Variational hedge.
+  const arb = buildPairedAnalysis({
+    hlState: {
+      positions: [{
+        venue: 'hyperliquid', symbol: 'SKY', size: -601000, side: 'short',
+        entryPx: 0.066, markPx: 0.066, notional: 39666, unrealizedPnl: 0, cumFundingSinceOpen: 0,
+      }],
+    },
+    nadoState: {
+      positions: [{
+        venue: 'nado', symbol: 'SKY', size: 301000, side: 'long',
+        entryPx: 0.066, markPx: 0.066, notional: 19866, unrealizedPnl: 0, fundingSinceOpen: 0,
+      }],
+    },
+    hlFunding: { payments: [], totalFunding: 0 },
+    nadoFunding: { payments: [], totalFunding: 0 },
+    hlFills: { fills: [], totalFees: 0, totalRealized: 0 },
+    nadoMatches: { matches: [], totalFees: 0, totalRealized: 0 },
+    spreadRows: [],
+    days: 30,
+  });
+  assert.equal(arb.paired.length, 1, 'SKY Nado×HL must pair');
+  assert.equal(arb.paired[0].pairType, 'hl_nado');
+  assert.equal(arb.paired[0].hlSize, -601000);
+  assert.equal(arb.paired[0].nadoSize, 301000);
+  assert.equal(arb.unhedged.length, 0);
+  pass('buildPairedAnalysis SKY Nado×HL partial pair');
 }
 
 {
