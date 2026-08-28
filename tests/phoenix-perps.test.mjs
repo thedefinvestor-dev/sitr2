@@ -12,6 +12,9 @@ const {
   phoenixHourlyRateFromPoint,
   phoenixQuoteLotsToUsd,
   phoenixPositionUnrealizedPnl,
+  createTokenBucket,
+  phoenixIsRateLimited,
+  createPhoenixApi,
 } = require('../lib/phoenix-perps.js');
 const {
   buildPairedAnalysis,
@@ -243,6 +246,57 @@ function pass(name) {
   );
   assert.equal(outKind.phoenixNetDeposits, 50);
   pass('computeCombinedNetDeposits phoenix');
+}
+
+{
+  // Rate limiter + 429 retry + funding-overview dedupe (mock transport, no network).
+  assert.equal(phoenixIsRateLimited({ error: 'rate_limited' }, ''), true);
+  assert.equal(phoenixIsRateLimited({}, 'rate_limited'), true);
+  assert.equal(phoenixIsRateLimited({ error: 'unknown' }, ''), false);
+  pass('phoenixIsRateLimited');
+
+  const fast = createTokenBucket({ ratePerSec: 1000, burst: 1000 });
+  const t0 = Date.now();
+  await Promise.all(Array.from({ length: 50 }, () => fast()));
+  assert.ok(Date.now() - t0 < 500, 'high-rate bucket must not stall 50 acquires');
+  const slow = createTokenBucket({ ratePerSec: 20, burst: 1 });
+  const t1 = Date.now();
+  await Promise.all(Array.from({ length: 5 }, () => slow()));
+  const elapsed = Date.now() - t1;
+  assert.ok(elapsed >= 150, `5 acquires at 20/s must take >=150ms (got ${elapsed}ms)`);
+  pass('createTokenBucket');
+
+  let calls = 0;
+  const responses = [
+    { status: 429, body: JSON.stringify({ error: 'rate_limited' }) },
+    { status: 429, body: JSON.stringify({ error: 'rate_limited' }) },
+    { status: 200, body: JSON.stringify({ series: [{ symbol: 'SOL-PERP', points: [{ fundingRatePercentage: '-0.000137', markPrice: '72' }] }] }) },
+  ];
+  const mockFetch = async () => {
+    calls += 1;
+    const next = responses.shift() || { status: 200, body: '{}' };
+    return {
+      ok: next.status < 300,
+      status: next.status,
+      headers: { get: (h) => (String(h).toLowerCase() === 'retry-after' ? '0.01' : null) },
+      text: async () => next.body,
+    };
+  };
+  const api = createPhoenixApi({
+    fetchWithTimeout: mockFetch,
+    withTimeout: (p) => p,
+    errorMessage: (e) => e?.message || String(e || ''),
+    toBaseSymbol: (s) => String(s || '').toUpperCase().replace(/-PERP$/i, ''),
+    timeoutMs: 5000,
+  });
+  const rates = await api.fetchPhoenixRates(['SOL']);
+  assert.equal(rates.length, 1);
+  assert.equal(rates[0].symbol, 'SOL');
+  assert.equal(calls, 3, '429 must be retried until success');
+  const again = await api.fetchPhoenixRates(['SOL']);
+  assert.equal(again.length, 1);
+  assert.equal(calls, 3, 'funding overview must be cached after first fetch');
+  pass('phoenixGet 429 retry + funding overview cache');
 }
 
 {
