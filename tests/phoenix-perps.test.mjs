@@ -98,6 +98,30 @@ function pass(name) {
 }
 
 {
+  // VVV: the markets API tickSize (10) is NOT the price divisor — the entry-
+  // derived divisor (entryPriceTicks / entryPriceUsd = 1000) must win, or the
+  // TP/SL come out 100x too high (SL $2300 instead of $23).
+  const { phoenixTpslFromPositionRow } = require('../lib/phoenix-perps.js');
+  const tpsl = phoenixTpslFromPositionRow({
+    entryPriceTicks: '14631',
+    entryPriceUsd: '14.631',
+    takeProfitTriggers: [{ status: 'active', trigger: { triggerPriceTicks: '10890' } }],
+    stopLossTriggers: [{ status: 'active', trigger: { triggerPriceTicks: '23000' } }],
+  }, 10);
+  assert.ok(Math.abs(tpsl.slPx - 23) < 0.01, `VVV SL must be ~23 (got ${tpsl.slPx})`);
+  assert.ok(Math.abs(tpsl.tpPx - 10.89) < 0.01, `VVV TP must be ~10.89 (got ${tpsl.tpPx})`);
+  // MON: tickSize 1 but divisor 1,000,000 → TP $0.049, not 49000.
+  const mon = phoenixTpslFromPositionRow({
+    entryPriceTicks: '28404',
+    entryPriceUsd: '0.028404',
+    takeProfitTriggers: [{ status: 'active', trigger: { triggerPriceTicks: '49000' } }],
+    stopLossTriggers: [],
+  }, 1);
+  assert.ok(Math.abs(mon.tpPx - 0.049) < 0.001, `MON TP must be ~0.049 (got ${mon.tpPx})`);
+  pass('phoenix TP/SL entry-derived divisor (VVV/MON 100x fix)');
+}
+
+{
   const rows = buildRateSpreadRows(
     ['SOL'],
     {},
