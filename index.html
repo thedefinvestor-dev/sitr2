@@ -34591,8 +34591,12 @@ function perpsApplyPartialSlicePnlAttribution(data, hedges) {
         for (const { leg, venue } of crossLegs) {
             const info = partialBySymVenue.get(`${sym}|${venue}`);
             if (!info || !(info.slice > 0)) continue;
-            const fullSize = Math.abs(Number(leg.size || 0));
+            // _origFullSize anchors the residual to the leg's pre-proration size
+            // so re-running attribution (the client calls it twice) is idempotent
+            // — never re-subtract the Var slice from the already-prorated leg.
+            const fullSize = Math.abs(Number((leg._origFullSize ?? leg.size) || 0));
             if (!fullSize) continue;
+            if (leg._origFullSize == null) leg._origFullSize = fullSize;
             const residualSize = Math.max(0, fullSize - info.slice);
             if (residualSize <= 0) {
                 leg.size = 0;
