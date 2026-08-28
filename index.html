@@ -35669,6 +35669,15 @@ function perpsHedgePartialWithVariational(symbol, venue, residualSize) {
             const existingPartial = Math.abs(Number(
                 existingHedge ? (VH?.hedgePartialSize?.(existingHedge) ?? existingHedge.partialSize ?? 0) : 0,
             ));
+            // If an existing partial hedge already covers the whole tracked leg
+            // (e.g. the user reduced the exchange leg below the stored slice),
+            // the residual is already Variational-hedged — don't try to extend
+            // past the full leg (would fail with "residual must be smaller…").
+            const fullLegSize = Math.abs(Number(leg?.size || 0));
+            if (fullLegSize > 0 && existingPartial >= fullLegSize - 1e-9) {
+                alert('This residual is already covered by an existing Variational hedge.');
+                return;
+            }
             const hedge = VH.createPartialHedgeFromLeg(leg, existingPartial + partial, leg?.markPx ?? null);
             if (!hedge) {
                 alert('Could not create the partial hedge (residual must be smaller than the full leg).');
@@ -35846,9 +35855,17 @@ function perpsPartialHedgeButtonHtml(p) {
     // Effective still-uncovered slice after any active partial hedge — the
     // button hedges the uncovered remainder, not the full pair-local residual.
     const effective = perpsEffectiveMismatchResidual(p);
-    const residualSize = effective && Number(effective.uncovered) > 0
-        ? Number(effective.uncovered)
-        : Number(partialInfo.residualSize);
+    let residualSize;
+    if (effective) {
+        // An active partial Variational hedge already covers the full residual —
+        // nothing left to hedge. Without this the button would try to extend the
+        // existing hedge past the full leg ("residual must be smaller than the
+        // full leg") when the stored slice exceeds the current live leg (SKY).
+        if (Number(effective.uncovered) <= 0) return '';
+        residualSize = Number(effective.uncovered);
+    } else {
+        residualSize = Number(partialInfo.residualSize);
+    }
     if (!Number.isFinite(residualSize) || residualSize <= 0) return '';
     const sym = p.symbol;
     const venue = partialInfo.venue;
