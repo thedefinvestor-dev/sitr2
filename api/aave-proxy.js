@@ -393,7 +393,7 @@ async function handlePerps(req, res) {
   try {
     const hedges = parseJson(await kvGet('vault:perps_variational_hedges'), []);
     const data = await cachedJson(
-      `perps:dashboard:${wallet.toLowerCase()}:${nadoWallet.toLowerCase()}:${grvtSubAccount}:${phoenixWallet}:${perpl ? perpl.apiKey.slice(0, 8) : 'nop'}:${days}`,
+      `perps:dashboard:${wallet.toLowerCase()}:${nadoWallet.toLowerCase()}:${grvtSubAccount}:${phoenixWallet}:${lighterWallet}:${perpl ? perpl.apiKey.slice(0, 8) : 'nop'}:${days}`,
       PERPS_DASHBOARD_CACHE_MS,
       'Perps dashboard',
       () => fetchPerpsDashboard(dashboardOpts, { hedges }),
