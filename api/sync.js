@@ -1427,6 +1427,18 @@ module.exports = async function handler(req, res) {
         delete incoming.phoenix;
       }
       delete incoming.phoenixWallet;
+      // Lighter EVM wallet — same never-wipe rule as Phoenix.
+      const incomingLighter = String(incoming.lighter || incoming.lighterWallet || '').trim();
+      const existingLighter = String(existingPerpsConfig.lighter || existingPerpsConfig.lighterWallet || '').trim();
+      const isEth = (v) => /^0x[a-fA-F0-9]{40}$/.test(String(v || '').trim());
+      if (!isEth(incomingLighter) && isEth(existingLighter)) {
+        incoming.lighter = existingLighter;
+      } else if (isEth(incomingLighter)) {
+        incoming.lighter = incomingLighter;
+      } else {
+        delete incoming.lighter;
+      }
+      delete incoming.lighterWallet;
       // Perpl integration disabled: strip keys so stored KV config is purged.
       delete incoming.perpl;
       delete incoming.perplApiKey;

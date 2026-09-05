@@ -1137,6 +1137,7 @@ body[data-active-tab="perps"] .topbar,
 .perps-pos-funding-sub { margin-top:0.48rem; color:#7f8f9f; font-size:0.58rem; line-height:1.35; }
 .perps-pos-funding-breakdown { margin-top:0.45rem; display:flex; flex-direction:column; gap:0.2rem; color:#9dacbb; font-size:0.58rem; line-height:1.25; }
 .perps-pos-funding-breakdown-row { display:flex; justify-content:space-between; gap:0.5rem; }
+.perps-pos-funding-pending { color:#8fa8c8; font-style:italic; }
 .perps-pos-funding-breakdown-label { display:flex; flex-direction:column; gap:0.05rem; min-width:0; }
 .perps-pos-funding-breakdown-note { color:#617083; font-size:0.52rem; white-space:nowrap; }
 .perps-pos-funding-empty { padding:0.9rem; color:#9dacbb; font-family:var(--ff-mono); font-size:0.68rem; }
@@ -9822,6 +9823,10 @@ body[data-active-tab="loops"] .page-content,
               <div>
                 <label for="perpsPhoenixWallet">Phoenix wallet (Solana)</label>
                 <input type="text" id="perpsPhoenixWallet" placeholder="Solana pubkey…" autocomplete="off">
+              </div>
+              <div>
+                <label for="perpsLighterWallet">Lighter wallet (EVM)</label>
+                <input type="text" id="perpsLighterWallet" placeholder="0x…" autocomplete="off">
               </div>
               <button type="button" class="perps-btn" onclick="perpsSaveConfigAndRefresh()">Save &amp; connect</button>
             </div>
@@ -32083,6 +32088,7 @@ function perpsApplyArbToDataObject() {
         configured: true,
     };
     if (perpsIsValidSolanaAddress(cfg.phoenix)) arb.phoenix = cfg.phoenix.trim();
+    if (perpsIsValidEthAddress(cfg.lighter)) arb.lighter = cfg.lighter.trim();
     const startMs = Number(cfg.pnlStartMs);
     const baseline = Number(cfg.pnlBaseline);
     if (Number.isFinite(startMs) && startMs > 0 && Number.isFinite(baseline)) {
@@ -32124,6 +32130,7 @@ function perpsRestoreWalletSnapshot(snapshot) {
             configured: true,
         };
         if (perpsIsValidSolanaAddress(snapshot.phoenix)) arb.phoenix = snapshot.phoenix.trim();
+        if (perpsIsValidEthAddress(snapshot.lighter)) arb.lighter = snapshot.lighter.trim();
         const startMs = Number(snapshot.pnlStartMs);
         const baseline = Number(snapshot.pnlBaseline);
         if (Number.isFinite(startMs) && startMs > 0 && Number.isFinite(baseline)) {
@@ -32176,6 +32183,7 @@ function perpsApplyWalletMasks() {
         ['perpsNadoWallet', 'nado'],
         ['perpsGrvtSubAccount', 'grvtSubAccount'],
         ['perpsPhoenixWallet', 'phoenix'],
+        ['perpsLighterWallet', 'lighter'],
     ];
     for (const [id, key] of fields) {
         const el = document.getElementById(id);
@@ -32188,7 +32196,7 @@ function perpsApplyWalletMasks() {
 }
 
 function perpsUnmaskWalletInputs() {
-    ['perpsHlWallet', 'perpsNadoWallet', 'perpsGrvtSubAccount', 'perpsPhoenixWallet'].forEach(id => {
+    ['perpsHlWallet', 'perpsNadoWallet', 'perpsGrvtSubAccount', 'perpsPhoenixWallet', 'perpsLighterWallet'].forEach(id => {
         const el = document.getElementById(id);
         if (!el || el.dataset.perpsDirty) return;
         if (el.dataset.perpsReal) el.value = el.dataset.perpsReal;
@@ -32285,8 +32293,10 @@ function perpsRepairSavedConfig() {
     const grvtSubAccount = saved.grvtSubAccount || perpsReadConfigField('perpsGrvtSubAccount', 'grvtSubAccount') || '4860249204328359';
     const phoenixRaw = saved.phoenix || perpsReadConfigField('perpsPhoenixWallet', 'phoenix') || '';
     const phoenix = perpsIsValidSolanaAddress(phoenixRaw) ? phoenixRaw.trim() : '';
+    const lighterRaw = saved.lighter || perpsReadConfigField('perpsLighterWallet', 'lighter') || '';
+    const lighter = perpsIsValidEthAddress(lighterRaw) ? lighterRaw.trim() : '';
     if (hl === saved.hyperliquid && saved.configured) return;
-    perpsPersistConfig({ ...saved, hyperliquid: hl, nado, grvtSubAccount, phoenix });
+    perpsPersistConfig({ ...saved, hyperliquid: hl, nado, grvtSubAccount, phoenix, lighter });
 }
 
 function perpsRenderFundingForTimeWindow(data) {
@@ -32589,6 +32599,7 @@ function perpsConfigPayload(cfg) {
     };
     // Omit empty Phoenix — never upload phoenix:'' (would fight cloud preserve + wipe portfolio mirror).
     if (perpsIsValidSolanaAddress(norm.phoenix)) payload.phoenix = norm.phoenix.trim();
+    if (perpsIsValidEthAddress(norm.lighter)) payload.lighter = norm.lighter.trim();
     // Compact PnL lock — survives localStorage eviction (loop snapshots can push quota).
     // Always preserve an existing lock even when callers omit pnl* fields (wallet save).
     let startMs = Number(norm.pnlStartMs);
@@ -33416,6 +33427,11 @@ function perpsApplyCloudConfig(serverConfig) {
     const phoenix = perpsIsValidSolanaAddress(serverPhoenix)
         ? serverPhoenix
         : (perpsIsValidSolanaAddress(localPhoenix) ? localPhoenix : '');
+    const serverLighter = String(server.lighter || server.lighterWallet || '').trim();
+    const localLighter = String(local.lighter || '').trim();
+    const lighter = perpsIsValidEthAddress(serverLighter)
+        ? serverLighter
+        : (perpsIsValidEthAddress(localLighter) ? localLighter : '');
 
     if (serverValid) {
         perpsPersistConfig({
@@ -33423,6 +33439,7 @@ function perpsApplyCloudConfig(serverConfig) {
             nado: server.nado || local.nado || '',
             grvtSubAccount: server.grvtSubAccount || local.grvtSubAccount || '4860249204328359',
             phoenix,
+            lighter,
             statRange: server.statRange || local.statRange || _perpsStatRange,
             equityChartMode: server.equityChartMode || local.equityChartMode || _perpsEquityChartMode,
             equityValueMode: server.equityValueMode || local.equityValueMode || _perpsEquityValueMode,
@@ -33476,6 +33493,43 @@ async function perpsEnsurePhoenixSyncedToCloud() {
             configured: true,
         };
         // Write local first without recursive cloud fan-out, then await a dedicated POST.
+        perpsPersistConfig(next, { skipCloudSync: true });
+        const pushed = await perpsPushPerpsConfigToCloud(next);
+        if (typeof saveData === 'function') await saveData();
+        return pushed;
+    } catch (e) {
+        return false;
+    }
+}
+
+/** Resolve Lighter EVM wallet from saved config, form field, or portfolio mirror. */
+function perpsResolveLocalLighterWallet() {
+    const local = perpsGetSavedConfig();
+    if (perpsIsValidEthAddress(local.lighter)) return local.lighter.trim();
+    const fromField = perpsReadConfigField('perpsLighterWallet', 'lighter');
+    if (perpsIsValidEthAddress(fromField)) return String(fromField).trim();
+    try {
+        const port = JSON.parse(localStorage.getItem('portfolio-data-pro') || '{}');
+        const fromArb = port?.perpsArb?.lighter || port?._perpsConfig?.lighter;
+        if (perpsIsValidEthAddress(fromArb)) return String(fromArb).trim();
+    } catch (e) {}
+    return '';
+}
+
+/** If this device has a Lighter wallet but cloud config does not, push it so cron + mobile see it. */
+async function perpsEnsureLighterSyncedToCloud() {
+    if (location.protocol === 'file:') return false;
+    const local = perpsGetSavedConfig();
+    const lighter = perpsResolveLocalLighterWallet();
+    if (!perpsIsValidEthAddress(lighter) || !perpsIsValidEthAddress(local.hyperliquid)) return false;
+    try {
+        const cloud = await perpsFetchCloudPerpsConfig();
+        if (perpsIsValidEthAddress(cloud?.lighter || cloud?.lighterWallet)) return false;
+        const next = {
+            ...local,
+            lighter,
+            configured: true,
+        };
         perpsPersistConfig(next, { skipCloudSync: true });
         const pushed = await perpsPushPerpsConfigToCloud(next);
         if (typeof saveData === 'function') await saveData();
@@ -33631,6 +33685,7 @@ async function perpsSaveConfigAndRefresh() {
     const nadoEl = document.getElementById('perpsNadoWallet');
     const grvtEl = document.getElementById('perpsGrvtSubAccount');
     const phoenixEl = document.getElementById('perpsPhoenixWallet');
+    const lighterEl = document.getElementById('perpsLighterWallet');
     if (hlEl) {
         const raw = hlEl.value.trim();
         if (raw && !/^\*+$/.test(raw)) hlEl.dataset.perpsReal = raw;
@@ -33647,6 +33702,10 @@ async function perpsSaveConfigAndRefresh() {
         const raw = phoenixEl.value.trim();
         if (raw && !/^\*+$/.test(raw)) phoenixEl.dataset.perpsReal = raw;
     }
+    if (lighterEl) {
+        const raw = lighterEl.value.trim();
+        if (raw && !/^\*+$/.test(raw)) lighterEl.dataset.perpsReal = raw;
+    }
     perpsSaveConfig();
     if (typeof saveData === 'function') await saveData();
     const saved = perpsGetSavedConfig();
@@ -33655,6 +33714,7 @@ async function perpsSaveConfigAndRefresh() {
         perpsNadoWallet: 'nado',
         perpsGrvtSubAccount: 'grvtSubAccount',
         perpsPhoenixWallet: 'phoenix',
+        perpsLighterWallet: 'lighter',
     };
     for (const [id, key] of Object.entries(fieldKeys)) {
         const el = document.getElementById(id);
@@ -33726,6 +33786,7 @@ function perpsVenueShortLabel(venue) {
     if (v === 'extended') return 'Ext';
     if (v === 'nado') return 'Nado';
     if (v === 'phoenix') return 'Phx';
+    if (v === 'lighter') return 'Lighter';
     if (v === 'variational') return 'Var';
     return venue || 'Exchange';
 }
@@ -35420,6 +35481,7 @@ function perpsFundingPaymentsForVenue(data, venue) {
         grvt: data?.grvt?.funding?.payments,
         extended: data?.extended?.funding?.payments,
         phoenix: data?.phoenix?.funding?.payments,
+        lighter: data?.lighter?.funding?.payments,
     };
     return sources[venue] || [];
 }
@@ -35431,6 +35493,7 @@ function perpsFillItemsForVenue(data, venue) {
         grvt: data?.grvt?.fills?.fills,
         extended: data?.extended?.fills?.fills,
         phoenix: data?.phoenix?.fills?.fills,
+        lighter: data?.lighter?.fills?.fills,
     };
     return sources[venue] || [];
 }
@@ -37317,6 +37380,7 @@ function perpsLoadConfig() {
     const nadoEl = document.getElementById('perpsNadoWallet');
     const grvtEl = document.getElementById('perpsGrvtSubAccount');
     const phoenixEl = document.getElementById('perpsPhoenixWallet');
+    const lighterEl = document.getElementById('perpsLighterWallet');
     if (!hlEl) return;
     try {
         const saved = perpsGetSavedConfig();
@@ -37332,6 +37396,7 @@ function perpsLoadConfig() {
         setFieldIfQuiet(nadoEl, saved.nado);
         setFieldIfQuiet(grvtEl, saved.grvtSubAccount || '4860249204328359');
         if (perpsIsValidSolanaAddress(saved.phoenix)) setFieldIfQuiet(phoenixEl, saved.phoenix);
+        if (perpsIsValidEthAddress(saved.lighter)) setFieldIfQuiet(lighterEl, saved.lighter);
         if (saved.statRange) _perpsStatRange = saved.statRange;
         if (saved.equityChartMode === 'all' || saved.equityChartMode === 'session') {
             _perpsEquityChartMode = saved.equityChartMode;
@@ -37367,7 +37432,7 @@ function perpsLoadConfig() {
 }
 
 function perpsBindConfigInputs() {
-    ['perpsHlWallet', 'perpsNadoWallet', 'perpsGrvtSubAccount', 'perpsPhoenixWallet'].forEach(id => {
+    ['perpsHlWallet', 'perpsNadoWallet', 'perpsGrvtSubAccount', 'perpsPhoenixWallet', 'perpsLighterWallet'].forEach(id => {
         const el = document.getElementById(id);
         if (!el || el.dataset.perpsBound) return;
         el.dataset.perpsBound = '1';
@@ -37421,11 +37486,14 @@ function perpsSaveConfig(opts = {}) {
     const grvtSubAccount = perpsReadConfigField('perpsGrvtSubAccount', 'grvtSubAccount') || prev.grvtSubAccount || '4860249204328359';
     const phoenixRaw = perpsReadConfigField('perpsPhoenixWallet', 'phoenix') || prev.phoenix || '';
     const phoenix = perpsIsValidSolanaAddress(phoenixRaw) ? phoenixRaw.trim() : '';
+    const lighterRaw = perpsReadConfigField('perpsLighterWallet', 'lighter') || prev.lighter || '';
+    const lighter = perpsIsValidEthAddress(lighterRaw) ? lighterRaw.trim() : '';
     perpsPersistConfig({
         hyperliquid: hl,
         nado,
         grvtSubAccount,
         phoenix,
+        lighter,
         statRange: _perpsStatRange,
         equityChartMode: _perpsEquityChartMode,
         equityValueMode: _perpsEquityValueMode,
@@ -38942,6 +39010,7 @@ function perpsVenueLabel(venue) {
         grvt: 'GRVT',
         extended: 'Extended',
         phoenix: 'Phoenix',
+        lighter: 'Lighter',
         variational: 'Variational',
     }[venue] || venue;
 }
@@ -39276,6 +39345,10 @@ function perpsVenueNativeFundingRate(venue, row) {
     }
     if (venue === 'phoenix') {
         const hourly = row.phoenixHourly ?? (row.phoenix8h != null ? row.phoenix8h / 8 : null);
+        return { rateDecimal: hourly, intervalHours: 1 };
+    }
+    if (venue === 'lighter') {
+        const hourly = row.lighterHourly ?? (row.lighter8h != null ? row.lighter8h / 8 : null);
         return { rateDecimal: hourly, intervalHours: 1 };
     }
     if (venue === 'variational') {
@@ -39686,7 +39759,7 @@ function perpsFormatEventTime(ts) {
 
 function perpsFundingIntervalHoursForVenue(venue, symbol) {
     const key = String(venue || '').toLowerCase();
-    if (key === 'hyperliquid' || key === 'extended') return 1;
+    if (key === 'hyperliquid' || key === 'extended' || key === 'lighter') return 1;
     if (key === 'nado') return 24;
     const native = perpsVenueNativeFundingRate(key, perpsRateSpreadRow(symbol));
     return native.intervalHours || 8;
@@ -39728,6 +39801,47 @@ function perpsRecentFundingHourBucket(ts) {
     return Math.floor((Number(ts) || 0) / 3600000) * 3600000;
 }
 
+/** Latest recorded funding event per pair venue + whether its leg is still open,
+ *  so the recent-funding cards can show "~ pending" (e.g. Phoenix funding-history
+ *  lags hours behind real settlements) instead of a misleading "—". */
+function perpsPairVenueFundingFrontier(p) {
+    const entries = perpsPairLegEntries(p);
+    const series = p.dailyPerformanceSeries || [];
+    const rawEvents = Array.isArray(p.recentFundingEvents) && p.recentFundingEvents.length
+        ? p.recentFundingEvents
+        : series.flatMap(row => row.fundingEvents || []);
+    const out = {};
+    for (const entry of entries) {
+        const key = String(entry.venue || '').toLowerCase();
+        let latestMs = 0;
+        for (const ev of rawEvents) {
+            if (String(ev.venue || '').toLowerCase() !== key) continue;
+            const t = Number(ev.time) || 0;
+            if (t > latestMs) latestMs = t;
+        }
+        out[key] = {
+            venue: key,
+            open: Math.abs(Number(entry.leg?.size || 0)) > 0,
+            latestMs,
+            intervalHours: perpsFundingIntervalHoursForVenue(entry.venue, p.symbol) || 1,
+        };
+    }
+    return out;
+}
+
+/** Is this venue expected to have settled an interval payment at `hourMs` but the
+ *  exchange's history simply has not reported it yet (data-finality lag)? */
+function perpsVenueFundingIsPending(info, hourMs) {
+    if (!info || !info.open) return false;
+    if (info.venue === 'variational') return false; // has its own explicit estimate/freeze
+    if (!(info.latestMs > 0)) return false; // never reported — nothing to call "pending"
+    const intervalMs = Math.max(1, Number(info.intervalHours) || 1) * 3600000;
+    if (!(hourMs > info.latestMs)) return false; // at/before frontier → genuine no-payment "—"
+    if (Date.now() - info.latestMs > intervalMs * 12) return false; // stale too long to call pending
+    if (hourMs > Date.now()) return false;
+    return true;
+}
+
 function perpsRecentFundingGroups(p) {
     const rows = perpsRecentFundingRows(p);
     const byHour = new Map();
@@ -39749,6 +39863,7 @@ function perpsRenderRecentFundingPayments(p) {
         return `<div class="perps-pos-funding-recent-head"><div class="perps-pos-funding-recent-title">Recent funding payments</div></div>` +
             `<div class="perps-pos-funding-empty">No funding payments found in the recent window for this position.</div>`;
     }
+    const frontier = perpsPairVenueFundingFrontier(p);
     const cards = groups.map(group => {
         const byVenue = new Map();
         group.rows.forEach(row => {
@@ -39762,7 +39877,14 @@ function perpsRenderRecentFundingPayments(p) {
             const hasValue = byVenue.has(key);
             const value = hasValue ? byVenue.get(key) : 0;
             const est = entry.venue === 'variational' || entry.leg?.fundingEstimated;
-            const label = hasValue && est ? perpsFmtEstUsd(value) : (hasValue ? perpsFmtUsd(value) : '—');
+            // A still-open leg whose venue's latest reported payment predates this
+            // hour is likely waiting on the exchange's funding-history feed (e.g.
+            // Phoenix lags several hours) — annotate instead of a bare "—".
+            const pending = !hasValue && perpsVenueFundingIsPending(frontier[key], group.time);
+            const label = hasValue && est ? perpsFmtEstUsd(value)
+                : hasValue ? perpsFmtUsd(value)
+                : pending ? `<span class="perps-pos-funding-pending" title="No ${dashEsc(perpsVenueLabel(entry.venue))} payment reported for this hour yet — the exchange funding-history feed can lag. It will appear once reported.">~ pending</span>`
+                : '—';
             return `<div class="perps-pos-funding-breakdown-row"><span>${perpsVenueWithSideHtml(entry.venue, entry.leg.size)}</span><span class="${hasValue ? perpsSignedCls(value) : ''}">${label}</span></div>`;
         }).join('')}</div>`;
         return `<div class="perps-pos-funding-card net">` +
@@ -40851,7 +40973,7 @@ function perpsRenderClosedPositions(closedPairs) {
 }
 
 function perpsVenueShort(venue) {
-    return { hyperliquid: 'HL', nado: 'Nado', grvt: 'GRVT', extended: 'Ext', phoenix: 'Phx', variational: 'Var' }[venue] || venue;
+    return { hyperliquid: 'HL', nado: 'Nado', grvt: 'GRVT', extended: 'Ext', phoenix: 'Phx', lighter: 'Lighter', variational: 'Var' }[venue] || venue;
 }
 
 function perpsPairLegs(p) {
@@ -41389,6 +41511,7 @@ function perpsVenueStateForLeverage(data, venue) {
     if (venue === 'grvt') return data?.grvt?.state || {};
     if (venue === 'extended') return data?.extended?.state || {};
     if (venue === 'phoenix') return data?.phoenix?.state || {};
+    if (venue === 'lighter') return data?.lighter?.state || {};
     return {};
 }
 
@@ -41399,6 +41522,7 @@ function perpsVenueEquityForLeverage(data, venue) {
     if (venue === 'grvt') return s.grvtAccountValue ?? data?.equityNow?.grvt ?? null;
     if (venue === 'extended') return s.extendedAccountValue ?? data?.equityNow?.extended ?? null;
     if (venue === 'phoenix') return s.phoenixAccountValue ?? data?.equityNow?.phoenix ?? null;
+    if (venue === 'lighter') return s.lighterAccountValue ?? data?.equityNow?.lighter ?? null;
     return null;
 }
 
@@ -41411,6 +41535,7 @@ function perpsRenderCrossMarginLeverage(data) {
         ['grvt', 'GRVT'],
         ['extended', 'Extended'],
         ['phoenix', 'Phoenix'],
+        ['lighter', 'Lighter'],
     ];
     el.innerHTML = venues.map(([venue, label]) => {
         const state = perpsVenueStateForLeverage(data, venue);
@@ -41679,6 +41804,8 @@ async function perpsRefresh(silent = false) {
         if (grvtSub) params.set('grvtSubAccount', grvtSub);
         const phoenixRaw = perpsReadConfigField('perpsPhoenixWallet', 'phoenix');
         if (phoenixRaw && perpsIsValidSolanaAddress(phoenixRaw)) params.set('phoenixWallet', phoenixRaw.trim());
+        const lighterRaw = perpsReadConfigField('perpsLighterWallet', 'lighter');
+        if (lighterRaw && perpsIsValidEthAddress(lighterRaw)) params.set('lighterWallet', lighterRaw.trim());
         const grvtCache = perpsLoadGrvtStateCache();
         if (grvtCache?.positions?.length) {
             const grvtJson = JSON.stringify(grvtCache.positions);

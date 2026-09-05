@@ -262,6 +262,7 @@ async function handlePerpsCronSnapshot(req, res) {
       nado: nadoWallet,
       grvtSubAccount,
       phoenix: isUsablePhoenixWallet(phoenixWallet) ? phoenixWallet : '',
+      lighter: String(config.lighter || config.lighterWallet || '').trim(),
       perpl,
       // Fallback only if capital-flow refresh fails; live flows override inside the fetcher.
       cumulativeNetDeposits: Number(previousSnapshot?.cumulativeNetDeposits) || 0,
@@ -320,6 +321,8 @@ async function handlePerps(req, res) {
   ).trim();
   const phoenixWalletRaw = String(req.query.phoenixWallet || req.query.phoenix || '').trim();
   const phoenixWallet = isUsablePhoenixWallet(phoenixWalletRaw) ? phoenixWalletRaw : '';
+  const lighterWalletRaw = String(req.query.lighterWallet || req.query.lighter || '').trim();
+  const lighterWallet = /^0x[0-9a-fA-F]{40}$/.test(lighterWalletRaw) ? lighterWalletRaw : '';
   const savedPerpsConfig = parseJson(await kvGet('vault:perps_config'), {});
   const perpl = resolvePerplConfig(req.query, savedPerpsConfig);
 
@@ -381,6 +384,7 @@ async function handlePerps(req, res) {
     nado: nadoWallet,
     grvtSubAccount,
     phoenix: phoenixWallet,
+    lighter: lighterWallet || String(savedPerpsConfig.lighter || savedPerpsConfig.lighterWallet || '').trim(),
     perpl,
     days,
     grvtPositionsOverride: req.query.grvtPositions || null,
