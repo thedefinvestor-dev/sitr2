@@ -10545,7 +10545,7 @@ const LogoEngine = (() => {
     let initDone = false;
     let initPromise = null;
     const LOGO_CACHE_TTL_MS = Number.MAX_SAFE_INTEGER;
-    const LOGO_CACHE_KEY = 'vault-logo-cache-v2';
+    const LOGO_CACHE_KEY = 'vault-logo-cache-v3'; // v3: crypto-first source order flushed stale stock logos
     const LOGO_META_KEY = 'vault-logo-meta-v1';
     let persistedCache = {};
     let persistTimer = null;
@@ -10702,8 +10702,17 @@ const LogoEngine = (() => {
         const geckoEntry = geckoMap[upper];
         const llamaSlug = TOKEN_TO_LLAMA_SLUG[upper] || lower;
         const manual = MANUAL_LOGOS[upper];
+        // Crypto sources FIRST: symbols like SKY/STRK/VVV are also stock tickers,
+        // and FMP/EODHD serve a (wrong) company logo for them. Equity/ETF logos
+        // are handled separately by tkFetchTradfiLogo, which calls FMP/EODHD directly.
         return [
             manual || null,
+            geckoEntry?.image || null,
+            `https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/${lower}.png`,
+            `https://cryptologos.cc/logos/${lower}-${lower}-logo.png`,
+            `https://assets.coincap.io/assets/icons/${lower}@2x.png`,
+            `https://icons.llamao.fi/icons/protocols/${llamaSlug}`,
+            llamaSlug !== lower ? `https://icons.llamao.fi/icons/protocols/${lower}` : null,
             `https://financialmodelingprep.com/image-stock/${upper}.png`,
             `https://financialmodelingprep.com/image-stock/${upper}.DE.png`,
             `https://financialmodelingprep.com/image-stock/${upper}.L.png`,
@@ -10711,12 +10720,6 @@ const LogoEngine = (() => {
             `https://financialmodelingprep.com/image-stock/${upper}.MI.png`,
             `https://eodhd.com/img/logos/US/${upper}.png`,
             `https://eodhd.com/img/logos/ETF/${upper}.png`,
-            `https://icons.llamao.fi/icons/protocols/${llamaSlug}`,
-            llamaSlug !== lower ? `https://icons.llamao.fi/icons/protocols/${lower}` : null,
-            geckoEntry?.image || null,
-            `https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/${lower}.png`,
-            `https://cryptologos.cc/logos/${lower}-${lower}-logo.png`,
-            `https://assets.coincap.io/assets/icons/${lower}@2x.png`,
         ].filter(Boolean);
     }
 
@@ -37621,7 +37624,8 @@ function perpsSaveSnapshot(data) {
         const grvtAccountValue = s.grvtAccountValue ?? data.equityNow?.grvt ?? 0;
         const extendedAccountValue = s.extendedAccountValue ?? data.equityNow?.extended ?? 0;
         const phoenixAccountValue = s.phoenixAccountValue ?? data.equityNow?.phoenix ?? 0;
-        const totalEquity = hlAccountValue + nadoAccountValue + grvtAccountValue + extendedAccountValue + phoenixAccountValue;
+        const lighterAccountValue = s.lighterAccountValue ?? data.equityNow?.lighter ?? 0;
+        const totalEquity = hlAccountValue + nadoAccountValue + grvtAccountValue + extendedAccountValue + phoenixAccountValue + lighterAccountValue;
         const combinedNetDeposits = s.combinedNetDeposits ?? data.capitalFlows?.combinedNetDeposits ?? 0;
         const variationalAdj = perpsComputeVariationalEquityAdjustments(data);
         const partialCloseRealizedPnl = perpsVariationalPartialCloseRealizedPnl();
@@ -40126,8 +40130,9 @@ function perpsComputePortfolioStats(data) {
     const grvtEquity = s.grvtAccountValue ?? data.equityNow?.grvt ?? 0;
     const extendedEquity = s.extendedAccountValue ?? data.equityNow?.extended ?? 0;
     const phoenixEquity = s.phoenixAccountValue ?? data.equityNow?.phoenix ?? 0;
-    const totalEquity = hlEquity + nadoEquity + grvtEquity + extendedEquity + phoenixEquity;
-    const venueEquity = { hl: hlEquity, nado: nadoEquity, grvt: grvtEquity, extended: extendedEquity, phoenix: phoenixEquity, total: totalEquity };
+    const lighterEquity = s.lighterAccountValue ?? data.equityNow?.lighter ?? 0;
+    const totalEquity = hlEquity + nadoEquity + grvtEquity + extendedEquity + phoenixEquity + lighterEquity;
+    const venueEquity = { hl: hlEquity, nado: nadoEquity, grvt: grvtEquity, extended: extendedEquity, phoenix: phoenixEquity, lighter: lighterEquity, total: totalEquity };
 
     let fundingAccrualTotal = 0;
     for (const p of paired) {
