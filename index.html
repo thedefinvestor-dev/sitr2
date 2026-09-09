@@ -17496,7 +17496,8 @@ function loopApiShortWallet(address) {
 }
 
 function loopNormalizeHealth(pos) {
-    const h = Number(pos?.health);
+    // Number(null) === 0 — must guard so missing health renders as "-" not "0.00".
+    const h = pos?.health == null ? NaN : Number(pos.health);
     if (!Number.isFinite(h)) return null;
     if (String(pos?.protocol || '').toLowerCase() === 'jupiter' && h > 0 && h < 1) return 1 + h;
     return h;
