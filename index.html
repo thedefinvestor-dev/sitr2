@@ -10727,14 +10727,13 @@ const LogoEngine = (() => {
         const lower = name.toLowerCase().trim();
         const slug = toSlug(name);
         const baseSlug = toSlug(name.replace(/\s+v\d.*$/i, '').trim());
-        // AaveV4 shares the Aave protocol mark (same brand, Hub & Spoke model).
-        const aaveAlias = lower === 'aavev4' ? 'aave' : null;
+        // Versioned names like "AaveV4" have a dashed DeFiLlama slug (aave-v4).
+        const dashed = slug.replace(/(v\d+)$/i, '-$1');
         return [
             llamaProtocolMap[lower], llamaProtocolMap[slug],
-            aaveAlias ? llamaProtocolMap[aaveAlias] : null,
             `https://icons.llamao.fi/icons/protocols/${slug}`,
+            dashed !== slug ? `https://icons.llamao.fi/icons/protocols/${dashed}` : null,
             `https://icons.llamao.fi/icons/protocols/${baseSlug}`,
-            aaveAlias ? `https://icons.llamao.fi/icons/protocols/${aaveAlias}` : null,
             `https://icons.llamao.fi/icons/protocols/${name.split(' ')[0].toLowerCase()}`,
             lower === 'fluid' ? 'https://icons.llamao.fi/icons/protocols/fluid-lending' : null,
             `https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/${baseSlug}.png`,
