@@ -9632,7 +9632,7 @@ body[data-active-tab="loops"] .page-content,
                 <div class="perps-stat-value" id="perpsStatEquity">—</div>
                 <div class="perps-stat-tip" id="perpsStatEquityTip"></div>
               </div>
-              <div class="perps-stat-sub" id="perpsStatEquitySub">HL · Nado · GRVT · Ext · Phoenix</div>
+              <div class="perps-stat-sub" id="perpsStatEquitySub">HL · Nado · GRVT · Ext · Phoenix · Lighter</div>
             </div>
             <div class="perps-stat-card"><div class="perps-stat-label" id="perpsStatPnlLabel"><span class="perps-mv3-only" id="perpsMv3PnlLabel">PnL · 7D</span><span class="perps-desktop-only">Total PnL</span></div><div class="perps-stat-value" id="perpsStatPnl">—</div><div class="perps-stat-sub" id="perpsStatPnlSub">selected window · funding − fees</div></div>
             <div class="perps-stat-card perps-stat-funding-card"><div class="perps-stat-label">Funding</div><div class="perps-stat-value" id="perpsStatFunding">—</div><div class="perps-stat-sub" id="perpsStatFundingSub">selected window</div></div>
@@ -37252,7 +37252,7 @@ function perpsMergeEquitySnapshotRecord(localSnap = {}, serverSnap = {}) {
         if (Number.isFinite(b)) return b;
         return undefined;
     };
-    for (const field of ['hlAccountValue', 'nadoAccountValue', 'grvtAccountValue', 'extendedAccountValue', 'phoenixAccountValue']) {
+    for (const field of ['hlAccountValue', 'nadoAccountValue', 'grvtAccountValue', 'extendedAccountValue', 'phoenixAccountValue', 'lighterAccountValue']) {
         const v = pickVenueEquity(field);
         if (v !== undefined) merged[field] = v;
     }
@@ -37262,6 +37262,7 @@ function perpsMergeEquitySnapshotRecord(localSnap = {}, serverSnap = {}) {
         merged.grvtAccountValue,
         merged.extendedAccountValue,
         merged.phoenixAccountValue,
+        merged.lighterAccountValue,
     ].map(Number).filter(Number.isFinite);
     if (parts.length) {
         merged.totalEquity = parts.reduce((s, n) => s + n, 0);
@@ -37734,6 +37735,7 @@ function perpsIsEquitySnapshotEligible(data) {
     if (s.grvtConfigured) values.push(s.grvtAccountValue ?? data?.equityNow?.grvt);
     if (s.extendedConfigured) values.push(s.extendedAccountValue ?? data?.equityNow?.extended);
     if (s.phoenixConfigured) values.push(s.phoenixAccountValue ?? data?.equityNow?.phoenix);
+    if (s.lighterConfigured) values.push(s.lighterAccountValue ?? data?.equityNow?.lighter);
     return values.every(Number.isFinite);
 }
 
@@ -38214,7 +38216,8 @@ function perpsBuildEquitySeries(data) {
     const grvtNow = s.grvtAccountValue ?? data.equityNow?.grvt ?? 0;
     const extendedNow = s.extendedAccountValue ?? data.equityNow?.extended ?? 0;
     const phoenixNow = s.phoenixAccountValue ?? data.equityNow?.phoenix ?? 0;
-    const totalNow = hlNow + nadoNow + grvtNow + extendedNow + phoenixNow;
+    const lighterNow = s.lighterAccountValue ?? data.equityNow?.lighter ?? 0;
+    const totalNow = hlNow + nadoNow + grvtNow + extendedNow + phoenixNow + lighterNow;
     const fetchedAt = data.fetchedAt || Date.now();
     const combinedNetDeposits = s.combinedNetDeposits ?? data.capitalFlows?.combinedNetDeposits ?? 0;
     const pnlNetDepositsNow = perpsResolvePointPnlNetDeposits(
@@ -41716,11 +41719,12 @@ function perpsRenderDashboard(data, opts = {}) {
 
 function perpsFormatConnectedStatus(payload) {
     const s = payload?.summary || {};
-    let status = `Connected · ${payload?.paired?.length || 0} pairs · equity ${perpsFmtUsd((s.hlAccountValue ?? 0) + (s.nadoAccountValue ?? 0) + (s.grvtAccountValue ?? 0) + (s.extendedAccountValue ?? 0) + (s.phoenixAccountValue ?? 0))}`;
+    let status = `Connected · ${payload?.paired?.length || 0} pairs · equity ${perpsFmtUsd((s.hlAccountValue ?? 0) + (s.nadoAccountValue ?? 0) + (s.grvtAccountValue ?? 0) + (s.extendedAccountValue ?? 0) + (s.phoenixAccountValue ?? 0) + (s.lighterAccountValue ?? 0))}`;
     if (s.nadoError) status += ` · NADO: ${s.nadoError}`;
     if (s.grvtError) status += ` · GRVT: ${s.grvtError}`;
     if (s.extendedError) status += ` · Extended: ${s.extendedError}`;
     if (s.phoenixError) status += ` · Phoenix: ${s.phoenixError}`;
+    if (s.lighterError) status += ` · Lighter: ${s.lighterError}`;
     return status;
 }
 
