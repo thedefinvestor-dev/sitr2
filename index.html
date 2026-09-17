@@ -9632,7 +9632,7 @@ body[data-active-tab="loops"] .page-content,
                 <div class="perps-stat-value" id="perpsStatEquity">—</div>
                 <div class="perps-stat-tip" id="perpsStatEquityTip"></div>
               </div>
-              <div class="perps-stat-sub" id="perpsStatEquitySub">HL · Nado · GRVT · Ext · Phoenix · Lighter</div>
+              <div class="perps-stat-sub" id="perpsStatEquitySub">HL · Nado · GRVT · Ext · Phoenix</div>
             </div>
             <div class="perps-stat-card"><div class="perps-stat-label" id="perpsStatPnlLabel"><span class="perps-mv3-only" id="perpsMv3PnlLabel">PnL · 7D</span><span class="perps-desktop-only">Total PnL</span></div><div class="perps-stat-value" id="perpsStatPnl">—</div><div class="perps-stat-sub" id="perpsStatPnlSub">selected window · funding − fees</div></div>
             <div class="perps-stat-card perps-stat-funding-card"><div class="perps-stat-label">Funding</div><div class="perps-stat-value" id="perpsStatFunding">—</div><div class="perps-stat-sub" id="perpsStatFundingSub">selected window</div></div>
@@ -10545,7 +10545,7 @@ const LogoEngine = (() => {
     let initDone = false;
     let initPromise = null;
     const LOGO_CACHE_TTL_MS = Number.MAX_SAFE_INTEGER;
-    const LOGO_CACHE_KEY = 'vault-logo-cache-v3'; // v3: crypto-first source order flushed stale stock logos
+    const LOGO_CACHE_KEY = 'vault-logo-cache-v2';
     const LOGO_META_KEY = 'vault-logo-meta-v1';
     let persistedCache = {};
     let persistTimer = null;
@@ -10702,17 +10702,8 @@ const LogoEngine = (() => {
         const geckoEntry = geckoMap[upper];
         const llamaSlug = TOKEN_TO_LLAMA_SLUG[upper] || lower;
         const manual = MANUAL_LOGOS[upper];
-        // Crypto sources FIRST: symbols like SKY/STRK/VVV are also stock tickers,
-        // and FMP/EODHD serve a (wrong) company logo for them. Equity/ETF logos
-        // are handled separately by tkFetchTradfiLogo, which calls FMP/EODHD directly.
         return [
             manual || null,
-            geckoEntry?.image || null,
-            `https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/${lower}.png`,
-            `https://cryptologos.cc/logos/${lower}-${lower}-logo.png`,
-            `https://assets.coincap.io/assets/icons/${lower}@2x.png`,
-            `https://icons.llamao.fi/icons/protocols/${llamaSlug}`,
-            llamaSlug !== lower ? `https://icons.llamao.fi/icons/protocols/${lower}` : null,
             `https://financialmodelingprep.com/image-stock/${upper}.png`,
             `https://financialmodelingprep.com/image-stock/${upper}.DE.png`,
             `https://financialmodelingprep.com/image-stock/${upper}.L.png`,
@@ -10720,6 +10711,12 @@ const LogoEngine = (() => {
             `https://financialmodelingprep.com/image-stock/${upper}.MI.png`,
             `https://eodhd.com/img/logos/US/${upper}.png`,
             `https://eodhd.com/img/logos/ETF/${upper}.png`,
+            `https://icons.llamao.fi/icons/protocols/${llamaSlug}`,
+            llamaSlug !== lower ? `https://icons.llamao.fi/icons/protocols/${lower}` : null,
+            geckoEntry?.image || null,
+            `https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/${lower}.png`,
+            `https://cryptologos.cc/logos/${lower}-${lower}-logo.png`,
+            `https://assets.coincap.io/assets/icons/${lower}@2x.png`,
         ].filter(Boolean);
     }
 
@@ -10727,12 +10724,9 @@ const LogoEngine = (() => {
         const lower = name.toLowerCase().trim();
         const slug = toSlug(name);
         const baseSlug = toSlug(name.replace(/\s+v\d.*$/i, '').trim());
-        // Versioned names like "AaveV4" have a dashed DeFiLlama slug (aave-v4).
-        const dashed = slug.replace(/(v\d+)$/i, '-$1');
         return [
             llamaProtocolMap[lower], llamaProtocolMap[slug],
             `https://icons.llamao.fi/icons/protocols/${slug}`,
-            dashed !== slug ? `https://icons.llamao.fi/icons/protocols/${dashed}` : null,
             `https://icons.llamao.fi/icons/protocols/${baseSlug}`,
             `https://icons.llamao.fi/icons/protocols/${name.split(' ')[0].toLowerCase()}`,
             lower === 'fluid' ? 'https://icons.llamao.fi/icons/protocols/fluid-lending' : null,
@@ -17495,8 +17489,7 @@ function loopApiShortWallet(address) {
 }
 
 function loopNormalizeHealth(pos) {
-    // Number(null) === 0 — must guard so missing health renders as "-" not "0.00".
-    const h = pos?.health == null ? NaN : Number(pos.health);
+    const h = Number(pos?.health);
     if (!Number.isFinite(h)) return null;
     if (String(pos?.protocol || '').toLowerCase() === 'jupiter' && h > 0 && h < 1) return 1 + h;
     return h;
@@ -32087,7 +32080,7 @@ function perpsApplyArbToDataObject() {
         hyperliquid: cfg.hyperliquid.trim(),
         nado: cfg.nado || '',
         grvtSubAccount: cfg.grvtSubAccount || '4860249204328359',
-        statRange: cfg.statRange || _perpsStatRange,
+        statRange: '7d',
         equityChartMode: cfg.equityChartMode === 'all' ? 'all' : 'session',
         equityValueMode: cfg.equityValueMode === 'raw'
             ? 'raw'
@@ -32129,7 +32122,7 @@ function perpsRestoreWalletSnapshot(snapshot) {
             hyperliquid: snapshot.hyperliquid,
             nado: snapshot.nado || '',
             grvtSubAccount: snapshot.grvtSubAccount || '4860249204328359',
-            statRange: snapshot.statRange || _perpsStatRange,
+            statRange: '7d',
             equityChartMode: snapshot.equityChartMode === 'all' ? 'all' : 'session',
             equityValueMode: snapshot.equityValueMode === 'raw'
                 ? 'raw'
@@ -32237,7 +32230,8 @@ function perpsSetStatRange(range, btn) {
     document.querySelectorAll('[data-perps-stat-range]').forEach(b => {
         b.classList.toggle('active', b === btn);
     });
-    perpsSaveConfig({ statRangeOnly: true });
+    // Do NOT persist statRange to localStorage — it's per-device and causes
+    // different totals on different screens. Range resets to '7d' on each load.
     if (_perpsLastData) {
         perpsRenderStatsBar(_perpsLastData);
         perpsRenderPositionsPanel(_perpsLastData);
@@ -32597,7 +32591,6 @@ function perpsConfigPayload(cfg) {
         hyperliquid: norm.hyperliquid.trim(),
         nado: norm.nado || '',
         grvtSubAccount: norm.grvtSubAccount || '4860249204328359',
-        statRange: norm.statRange || _perpsStatRange,
         equityChartMode: norm.equityChartMode === 'all' ? 'all' : 'session',
         equityValueMode: norm.equityValueMode === 'raw'
             ? 'raw'
@@ -33447,7 +33440,6 @@ function perpsApplyCloudConfig(serverConfig) {
             grvtSubAccount: server.grvtSubAccount || local.grvtSubAccount || '4860249204328359',
             phoenix,
             lighter,
-            statRange: server.statRange || local.statRange || _perpsStatRange,
             equityChartMode: server.equityChartMode || local.equityChartMode || _perpsEquityChartMode,
             equityValueMode: server.equityValueMode || local.equityValueMode || _perpsEquityValueMode,
             pnlStartMs: server.pnlStartMs ?? local.pnlStartMs,
@@ -37252,7 +37244,7 @@ function perpsMergeEquitySnapshotRecord(localSnap = {}, serverSnap = {}) {
         if (Number.isFinite(b)) return b;
         return undefined;
     };
-    for (const field of ['hlAccountValue', 'nadoAccountValue', 'grvtAccountValue', 'extendedAccountValue', 'phoenixAccountValue', 'lighterAccountValue']) {
+    for (const field of ['hlAccountValue', 'nadoAccountValue', 'grvtAccountValue', 'extendedAccountValue', 'phoenixAccountValue']) {
         const v = pickVenueEquity(field);
         if (v !== undefined) merged[field] = v;
     }
@@ -37262,7 +37254,6 @@ function perpsMergeEquitySnapshotRecord(localSnap = {}, serverSnap = {}) {
         merged.grvtAccountValue,
         merged.extendedAccountValue,
         merged.phoenixAccountValue,
-        merged.lighterAccountValue,
     ].map(Number).filter(Number.isFinite);
     if (parts.length) {
         merged.totalEquity = parts.reduce((s, n) => s + n, 0);
@@ -37405,7 +37396,8 @@ function perpsLoadConfig() {
         setFieldIfQuiet(grvtEl, saved.grvtSubAccount || '4860249204328359');
         if (perpsIsValidSolanaAddress(saved.phoenix)) setFieldIfQuiet(phoenixEl, saved.phoenix);
         if (perpsIsValidEthAddress(saved.lighter)) setFieldIfQuiet(lighterEl, saved.lighter);
-        if (saved.statRange) _perpsStatRange = saved.statRange;
+        // statRange is NOT restored from localStorage — keeps it per-device out of sync.
+        _perpsStatRange = '7d';
         if (saved.equityChartMode === 'all' || saved.equityChartMode === 'session') {
             _perpsEquityChartMode = saved.equityChartMode;
         }
@@ -37484,7 +37476,7 @@ function perpsSaveConfig(opts = {}) {
 
     if (!perpsIsValidEthAddress(hl)) {
         if (opts.statRangeOnly && perpsIsValidEthAddress(prev.hyperliquid)) {
-            perpsPersistConfig({ ...prev, statRange: _perpsStatRange, equityChartMode: _perpsEquityChartMode, equityValueMode: _perpsEquityValueMode });
+            perpsPersistConfig({ ...prev, equityChartMode: _perpsEquityChartMode, equityValueMode: _perpsEquityValueMode });
         }
         perpsUpdateConfigVisibility();
         return;
@@ -37502,7 +37494,6 @@ function perpsSaveConfig(opts = {}) {
         grvtSubAccount,
         phoenix,
         lighter,
-        statRange: _perpsStatRange,
         equityChartMode: _perpsEquityChartMode,
         equityValueMode: _perpsEquityValueMode,
     });
@@ -37735,7 +37726,6 @@ function perpsIsEquitySnapshotEligible(data) {
     if (s.grvtConfigured) values.push(s.grvtAccountValue ?? data?.equityNow?.grvt);
     if (s.extendedConfigured) values.push(s.extendedAccountValue ?? data?.equityNow?.extended);
     if (s.phoenixConfigured) values.push(s.phoenixAccountValue ?? data?.equityNow?.phoenix);
-    if (s.lighterConfigured) values.push(s.lighterAccountValue ?? data?.equityNow?.lighter);
     return values.every(Number.isFinite);
 }
 
@@ -38216,8 +38206,7 @@ function perpsBuildEquitySeries(data) {
     const grvtNow = s.grvtAccountValue ?? data.equityNow?.grvt ?? 0;
     const extendedNow = s.extendedAccountValue ?? data.equityNow?.extended ?? 0;
     const phoenixNow = s.phoenixAccountValue ?? data.equityNow?.phoenix ?? 0;
-    const lighterNow = s.lighterAccountValue ?? data.equityNow?.lighter ?? 0;
-    const totalNow = hlNow + nadoNow + grvtNow + extendedNow + phoenixNow + lighterNow;
+    const totalNow = hlNow + nadoNow + grvtNow + extendedNow + phoenixNow;
     const fetchedAt = data.fetchedAt || Date.now();
     const combinedNetDeposits = s.combinedNetDeposits ?? data.capitalFlows?.combinedNetDeposits ?? 0;
     const pnlNetDepositsNow = perpsResolvePointPnlNetDeposits(
@@ -41719,12 +41708,11 @@ function perpsRenderDashboard(data, opts = {}) {
 
 function perpsFormatConnectedStatus(payload) {
     const s = payload?.summary || {};
-    let status = `Connected · ${payload?.paired?.length || 0} pairs · equity ${perpsFmtUsd((s.hlAccountValue ?? 0) + (s.nadoAccountValue ?? 0) + (s.grvtAccountValue ?? 0) + (s.extendedAccountValue ?? 0) + (s.phoenixAccountValue ?? 0) + (s.lighterAccountValue ?? 0))}`;
+    let status = `Connected · ${payload?.paired?.length || 0} pairs · equity ${perpsFmtUsd((s.hlAccountValue ?? 0) + (s.nadoAccountValue ?? 0) + (s.grvtAccountValue ?? 0) + (s.extendedAccountValue ?? 0) + (s.phoenixAccountValue ?? 0))}`;
     if (s.nadoError) status += ` · NADO: ${s.nadoError}`;
     if (s.grvtError) status += ` · GRVT: ${s.grvtError}`;
     if (s.extendedError) status += ` · Extended: ${s.extendedError}`;
     if (s.phoenixError) status += ` · Phoenix: ${s.phoenixError}`;
-    if (s.lighterError) status += ` · Lighter: ${s.lighterError}`;
     return status;
 }
 
