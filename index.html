@@ -32335,7 +32335,12 @@ function perpsFilterDailySeries(series, range) {
     const rows = Array.isArray(series) ? series : [];
     const ms = perpsStatRangeMs(range);
     if (!ms) return perpsRecomputeDailySeriesCumulative(perpsTrimDailySeriesToLatestSession(rows));
-    const cutoff = Date.now() - ms;
+    // Anchor the cutoff to the END of the current Bucharest day, then go back (ms)
+    // — this gives exactly (range) completed Bucharest calendar days regardless of
+    // the current UTC hour.
+    const nowBucharestDay = _perpsBucharestDayFmt.format(new Date());
+    const endOfToday = perpsFundingDayEndMs(nowBucharestDay);
+    const cutoff = endOfToday - ms + 1;
     const trimmed = rows
         .filter(r => perpsFundingDayEndMs(r.day || '') >= cutoff)
         .map(r => perpsTrimDailyRowToCutoff(r, cutoff))
