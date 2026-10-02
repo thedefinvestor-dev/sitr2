@@ -10724,9 +10724,12 @@ const LogoEngine = (() => {
         const lower = name.toLowerCase().trim();
         const slug = toSlug(name);
         const baseSlug = toSlug(name.replace(/\s+v\d.*$/i, '').trim());
+        // dashed slug for versioned names like "AaveV4" → "aave-v4" (DeFiLlama icon slug)
+        const dashed = slug.replace(/(\w)(v\d+)$/i, '$1-$2');
         return [
             llamaProtocolMap[lower], llamaProtocolMap[slug],
             `https://icons.llamao.fi/icons/protocols/${slug}`,
+            dashed !== slug ? `https://icons.llamao.fi/icons/protocols/${dashed}` : null,
             `https://icons.llamao.fi/icons/protocols/${baseSlug}`,
             `https://icons.llamao.fi/icons/protocols/${name.split(' ')[0].toLowerCase()}`,
             lower === 'fluid' ? 'https://icons.llamao.fi/icons/protocols/fluid-lending' : null,
@@ -17701,7 +17704,7 @@ async function syncLoopApiPositions({ silent = false, persistSnapshot = !silent,
     }
 }
 
-const LOOP_SNAPSHOT_INTERVAL_MS = 2 * 60 * 60 * 1000;
+const LOOP_SNAPSHOT_INTERVAL_MS = 15 * 60 * 1000;
 let _loopSnapshotTimer = null;
 
 function startLoopSnapshotScheduler() {
